@@ -1,8 +1,15 @@
 {
   "name": "@kairos.trade/sdk",
   "version": "0.1.0",
-  "private": true,
   "description": "Kairos SDK: market data, wallet trading (sign-what-we-send) and external signing. No runtime dependencies.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kairoslive/kairos-sdk.git"
+  },
+  "homepage": "https://github.com/kairoslive/kairos-sdk#readme",
+  "bugs": {
+    "url": "https://github.com/kairoslive/kairos-sdk/issues"
+  },
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -12,9 +19,15 @@
       "import": "./dist/index.js"
     }
   },
-  "files": ["dist", "README.md", "LICENSE"],
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
   "sideEffects": false,
-  "engines": { "node": ">=20" },
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "build": "rm -rf dist && tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
@@ -22,10 +35,22 @@
     "test:live": "node --experimental-strip-types --no-warnings --test test/live/*.test.ts",
     "prepublishOnly": "npm run typecheck && npm test && npm run build"
   },
-  "keywords": ["kairos", "prediction-markets", "polymarket", "kalshi", "eip712", "eip1193", "wallet"],
+  "keywords": [
+    "kairos",
+    "prediction-markets",
+    "polymarket",
+    "kalshi",
+    "eip712",
+    "eip1193",
+    "wallet"
+  ],
   "license": "MIT",
   "devDependencies": {
     "@types/node": "^22.10.0",
     "typescript": "5.9.3"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
   }
 }
