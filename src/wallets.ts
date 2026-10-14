@@ -45,7 +45,10 @@ export interface Step<R = unknown> {
 
 export interface SetupResult {
   ready: boolean;
+  /** The wallet's Polymarket deposit wallet: fund this address with pUSD. */
   tradingWallet: string;
+  /** The approvals transaction, when setup sent one. */
+  transactionHash?: string | null;
 }
 
 export interface OrderResult {
