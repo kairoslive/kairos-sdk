@@ -5,7 +5,7 @@
 //
 // In a browser app pass `window.ethereum` as the provider. Here ethers v6 stands in for it.
 import { Wallet } from 'ethers'
-import { createKairos } from '@kairos/sdk'
+import { createKairos } from '@kairostrade/sdk'
 
 const signer = process.env.PRIVATE_KEY ? new Wallet(process.env.PRIVATE_KEY) : Wallet.createRandom()
 const provider = {

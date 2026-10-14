@@ -1,5 +1,5 @@
 {
-  "name": "@kairos/sdk",
+  "name": "@kairostrade/sdk",
   "version": "0.1.0",
   "private": true,
   "description": "Kairos SDK: market data, wallet trading (sign-what-we-send) and external signing. No runtime dependencies.",

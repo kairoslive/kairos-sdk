@@ -3,7 +3,7 @@
 One TypeScript package for Kairos: market data, wallet trading, and external signing. No runtime dependencies, works in browsers and Node 20+.
 
 ```bash
-npm install @kairos/sdk
+npm install @kairostrade/sdk
 ```
 
 ## Market data
@@ -11,7 +11,7 @@ npm install @kairos/sdk
 Public, no key.
 
 ```ts
-import { createKairos } from '@kairos/sdk'
+import { createKairos } from '@kairostrade/sdk'
 
 const kairos = createKairos()
 
@@ -81,7 +81,7 @@ Get your partner id and base URL from Kairos.
 Lower level: build Polymarket order digests yourself, sign them with an EOA or smart account, and submit through Kairos.
 
 ```ts
-import { signing } from '@kairos/sdk'
+import { signing } from '@kairostrade/sdk'
 
 const client = new signing.KairosExternalSigningClient({ baseUrl, auth: { bearer: jwt } })
 const intent = await client.createIntent({ intent: { token_id, side: 'buy', price: '0.52', size: '100', time_in_force: 'GTC', neg_risk: false, owner_address, signature_type: 0 }, market_id, outcome: 'Yes' })
