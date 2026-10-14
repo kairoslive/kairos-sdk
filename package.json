@@ -1,0 +1,31 @@
+{
+  "name": "@kairoslive/sdk",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Kairos SDK: market data, wallet trading (sign-what-we-send) and external signing. No runtime dependencies.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist", "README.md", "LICENSE"],
+  "sideEffects": false,
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "build": "rm -rf dist && tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-strip-types --no-warnings --test test/*.test.ts",
+    "test:live": "node --experimental-strip-types --no-warnings --test test/live/*.test.ts",
+    "prepublishOnly": "npm run typecheck && npm test && npm run build"
+  },
+  "keywords": ["kairos", "prediction-markets", "polymarket", "kalshi", "eip712", "eip1193", "wallet"],
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "5.9.3"
+  }
+}
