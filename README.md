@@ -59,19 +59,22 @@ const { orderId } = await kairos.wallet.order(wallet, {
   size: '10',
 })
 
+// Reads need a key: the first read asks the wallet for one `personal_sign` (Sign-In with Ethereum).
 const open = await kairos.wallet.orders(wallet, { open: true })
-const positions = await kairos.wallet.positions(wallet)
+const { positions, resolved } = await kairos.wallet.positions(wallet)
 
 await kairos.wallet.cancel(wallet, [orderId])
 await kairos.wallet.cancelAll(wallet)
 ```
 
-Each call asks the wallet for one `eth_signTypedData_v4` signature per step and returns the action's result.
+Each action asks the wallet for one `eth_signTypedData_v4` signature per step and returns the action's result.
+
+`orders` and `positions` are private, so they need the wallet's API key. The SDK gets it on the first read: `login(wallet)` signs a Sign-In with Ethereum message (`personal_sign`) and Kairos returns a key bound to that wallet. The wallet must be set up first. The key expires at `expiresAt` (24 hours today), and a new login replaces the old one; the SDK logs in again when the key expires or is replaced. To skip the prompt in a new session, save the key from `onLogin` in secure storage and pass it back with `useCredentials(wallet, key)`. The key can trade, so treat it as a secret and never send it anywhere but Kairos.
 
 | Error | Means |
 |---|---|
 | `ActionFailedError` | The action failed. `error.message` says why. Start a new one to retry |
-| `KairosError` with `status` | The request was refused (`400` bad input, `403` unknown partner or disabled wallet, `409` not set up or linked to a Kairos account, `429` slow down) |
+| `KairosError` with `status` | The request was refused (`400` bad input, `401` bad or missing key, `403` unknown partner or disabled wallet, `404` not this key's wallet, `409` not set up or linked to a Kairos account, `429` slow down) |
 | `KairosError` with `outcomeUnknown` | A 5xx on an order: it may be live. Check `orders(wallet, { open: true })` before retrying |
 
 Get your partner id and base URL from Kairos.

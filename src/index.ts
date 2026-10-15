@@ -50,6 +50,8 @@ export {
   type WalletClientOptions,
   type WalletOrder,
   type WalletPosition,
+  type WalletPositions,
+  type WalletCredentials,
   type WalletStatus,
 } from "./wallets.ts";
 

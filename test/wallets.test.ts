@@ -100,24 +100,98 @@ test("HTTP errors surface as KairosError; 5xx flags an unknown outcome", async (
     () => [502, { error: "venue unavailable" }],
   ]);
   const client = new WalletClient({ baseUrl: "https://exec.test", partnerId: "acme", provider: fakeWallet().provider, fetch: impl });
+  client.useCredentials(WALLET, { clientId: "c", apiKey: "k", apiSecret: "s", expiresAt: "2999-01-01T00:00:00Z" });
   await assert.rejects(client.orders(WALLET), (e: unknown) => e instanceof KairosError && e.status === 409 && !e.outcomeUnknown && e.message === "the wallet isn't set up");
   await assert.rejects(client.order(WALLET, { market: "m", outcome: "Yes", side: "buy", price: "0.1", size: "5" }), (e: unknown) => e instanceof KairosError && e.outcomeUnknown);
 });
 
+const KEY = { client_id: "kairos_ck_1", api_key: "k1", api_secret: "s1", expires_at: "2999-01-01T00:00:00Z" };
+const siweRoutes = (keys = [KEY]) => {
+  let n = 0;
+  return [
+    (c: Call): [number, unknown] | undefined => (c.url.endsWith("/v2/auth/siwe/challenge") ? [200, { nonce: "n", message: "exec.test wants you to sign in", expires_at_us: 0 }] : undefined),
+    (c: Call): [number, unknown] | undefined => (c.url.endsWith("/v2/auth/siwe/verify") ? [200, keys[Math.min(n++, keys.length - 1)]] : undefined),
+  ];
+};
+const POSITIONS = { positions: [{ token_id: "t", market_id: "m", outcome: "Yes", net_size: "5" }], resolved: [], closed: [], as_of: "2026-10-15T00:00:00Z" };
+
 test("reads: status, open orders with query, positions, cancelAll payload", async () => {
   const { impl, calls } = fakeFetch([
+    ...siweRoutes(),
     (c) => (c.url.endsWith(`/v3/wallets/${WALLET}`) ? [200, { wallet: WALLET, tradingWallet: "0xdw", ready: true, balance: "25", next: null }] : undefined),
     (c) => (c.url.includes("/orders") ? [200, { orders: [{ id: "o1", status: "open" }] }] : undefined),
-    (c) => (c.url.includes("/positions") ? [200, { positions: [] }] : undefined),
+    (c) => (c.url.includes("/positions") ? [200, { positions: POSITIONS }] : undefined),
     (c) => (c.method === "POST" ? [200, { id: "x", type: "cancel", status: "done", request: null, description: null, result: { cancelled: ["o1"], failed: 0 }, error: null }] : undefined),
   ]);
   const client = new WalletClient({ baseUrl: "https://exec.test", partnerId: "acme", provider: fakeWallet().provider, fetch: impl });
   assert.equal((await client.status(WALLET)).next, null);
   assert.deepEqual(await client.orders(WALLET, { open: true, limit: 10 }), [{ id: "o1", status: "open" }]);
-  assert.ok(calls[1].url.endsWith(`/orders?open=true&limit=10`));
-  assert.deepEqual(await client.positions(WALLET), []);
+  assert.ok(calls.find((c) => c.url.includes("/orders"))!.url.endsWith(`/orders?open=true&limit=10`));
+  assert.deepEqual(await client.positions(WALLET), POSITIONS);
   assert.deepEqual(await client.cancelAll(WALLET), { cancelled: ["o1"], failed: 0 });
-  assert.deepEqual(calls[3].body, { wallet: WALLET, action: { type: "cancel", all: true } });
+  const cancel = calls.at(-1)!;
+  assert.deepEqual(cancel.body, { wallet: WALLET, action: { type: "cancel", all: true } });
+  assert.equal(cancel.headers["x-api-key"], undefined, "actions never carry the key");
+});
+
+test("login: one personal_sign of the challenge, key sent only on reads, reused until it expires", async () => {
+  const { impl, calls } = fakeFetch([...siweRoutes(), (c) => (c.url.includes("/orders") ? [200, { orders: [] }] : undefined)]);
+  const { provider, requests } = fakeWallet("0xsig");
+  const saved: unknown[] = [];
+  const client = new WalletClient({ baseUrl: "https://exec.test", partnerId: "acme", provider, fetch: impl, onLogin: (w, k) => saved.push([w, k]) });
+
+  await client.orders(WALLET);
+  await client.orders(WALLET);
+
+  const hex = "0x" + Buffer.from("exec.test wants you to sign in").toString("hex");
+  assert.deepEqual(requests, [{ method: "personal_sign", params: [hex, WALLET] }]);
+  assert.deepEqual(calls.find((c) => c.url.endsWith("/verify"))!.body, { message: "exec.test wants you to sign in", signature_hex: "0xsig" });
+  const reads = calls.filter((c) => c.url.includes("/orders"));
+  assert.equal(reads.length, 2);
+  for (const r of reads) assert.deepEqual([r.headers["x-client-id"], r.headers["x-api-key"], r.headers["x-api-secret"]], ["kairos_ck_1", "k1", "s1"]);
+  assert.deepEqual(saved, [[WALLET, { clientId: "kairos_ck_1", apiKey: "k1", apiSecret: "s1", expiresAt: KEY.expires_at }]]);
+});
+
+test("login: a restored key is used without signing; a 401 logs in once and retries; a 429 is not retried", async () => {
+  const { impl, calls } = fakeFetch([
+    ...siweRoutes([{ ...KEY, client_id: "kairos_ck_2" }]),
+    (c) => (c.url.includes("/positions") && c.headers["x-client-id"] === "old" ? [401, { error: "Invalid API credentials" }] : undefined),
+    (c) => (c.url.includes("/positions") && c.headers["x-client-id"] === "throttled" ? [429, { error: "Too many authentication attempts" }] : undefined),
+    (c) => (c.url.includes("/positions") ? [200, { positions: POSITIONS }] : undefined),
+  ]);
+  const { provider, requests } = fakeWallet();
+  const client = new WalletClient({ baseUrl: "https://exec.test", partnerId: "acme", provider, fetch: impl });
+
+  client.useCredentials(WALLET.toUpperCase().replace("0X", "0x"), { clientId: "old", apiKey: "k", apiSecret: "s", expiresAt: KEY.expires_at });
+  assert.deepEqual(await client.positions(WALLET), POSITIONS);
+  assert.equal(requests.length, 1, "re-logged in once after the 401");
+  assert.equal(calls.filter((c) => c.url.includes("/positions")).at(-1)!.headers["x-client-id"], "kairos_ck_2");
+
+  client.useCredentials(WALLET, { clientId: "throttled", apiKey: "k", apiSecret: "s", expiresAt: KEY.expires_at });
+  await assert.rejects(client.positions(WALLET), (e: unknown) => e instanceof KairosError && e.status === 429);
+  assert.equal(requests.length, 1);
+});
+
+test("login: concurrent reads share one sign-in", async () => {
+  const { impl, calls } = fakeFetch([
+    ...siweRoutes(),
+    (c) => (c.url.includes("/orders") ? [200, { orders: [] }] : undefined),
+    (c) => (c.url.includes("/positions") ? [200, { positions: POSITIONS }] : undefined),
+  ]);
+  const { provider, requests } = fakeWallet();
+  const client = new WalletClient({ baseUrl: "https://exec.test", partnerId: "acme", provider, fetch: impl });
+  await Promise.all([client.orders(WALLET), client.positions(WALLET)]);
+  assert.equal(requests.length, 1);
+  assert.equal(calls.filter((c) => c.url.endsWith("/verify")).length, 1);
+});
+
+test("login: an expired key is replaced before the read", async () => {
+  const { impl } = fakeFetch([...siweRoutes(), (c) => (c.url.includes("/orders") && c.headers["x-client-id"] === "kairos_ck_1" ? [200, { orders: [] }] : undefined)]);
+  const { provider, requests } = fakeWallet();
+  const client = new WalletClient({ baseUrl: "https://exec.test", partnerId: "acme", provider, fetch: impl });
+  client.useCredentials(WALLET, { clientId: "stale", apiKey: "k", apiSecret: "s", expiresAt: "2000-01-01T00:00:00Z" });
+  assert.deepEqual(await client.orders(WALLET), []);
+  assert.equal(requests.length, 1);
 });
 
 test("createKairos: markets works without wallet options; wallet explains what it needs", () => {

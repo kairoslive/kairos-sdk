@@ -37,9 +37,13 @@ export class Http {
     this.fetchImpl = opts.fetch ?? ((input, init) => fetch(input, init));
   }
 
-  async request<T>(method: "GET" | "POST", path: string, opts: { query?: Query; body?: unknown } = {}): Promise<T> {
+  async request<T>(
+    method: "GET" | "POST",
+    path: string,
+    opts: { query?: Query; body?: unknown; headers?: Record<string, string> } = {},
+  ): Promise<T> {
     const url = this.baseUrl + path + queryString(opts.query);
-    const headers: Record<string, string> = { accept: "application/json", ...this.headers };
+    const headers: Record<string, string> = { accept: "application/json", ...this.headers, ...opts.headers };
     if (opts.body !== undefined) headers["content-type"] = "application/json";
     const res = await this.fetchImpl(url, {
       method,
@@ -61,8 +65,8 @@ export class Http {
     return json as T;
   }
 
-  get<T>(path: string, query?: Query): Promise<T> {
-    return this.request<T>("GET", path, { query });
+  get<T>(path: string, query?: Query, headers?: Record<string, string>): Promise<T> {
+    return this.request<T>("GET", path, { query, headers });
   }
 
   post<T>(path: string, body?: unknown, query?: Query): Promise<T> {
