@@ -26,7 +26,5 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm test
       - run: pnpm build
-      # Uses the trusted publisher (OIDC) when configured on npm; NPM_TOKEN only for the first publish.
+      # Trusted publisher (OIDC): no token, so npm exchanges the workflow's id-token.
       - run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
