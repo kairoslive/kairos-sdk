@@ -4,12 +4,13 @@
 //   MARKET=<condition id> OUTCOME=Yes PRICE=0.01 SIZE=5 node examples/wallet.mjs
 //
 // In a browser app pass `window.ethereum` as the provider. Here ethers v6 stands in for it.
-import { Wallet } from 'ethers'
+import { Wallet, getBytes } from 'ethers'
 import { createKairos } from '@kairos.trade/sdk'
 
 const signer = process.env.PRIVATE_KEY ? new Wallet(process.env.PRIVATE_KEY) : Wallet.createRandom()
 const provider = {
   async request({ method, params }) {
+    if (method === 'personal_sign') return signer.signMessage(getBytes(params[0])) // sign-in for reads
     if (method !== 'eth_signTypedData_v4') throw new Error(`unsupported wallet method ${method}`)
     const { domain, types, message } = JSON.parse(params[1])
     const { EIP712Domain, ...structTypes } = types
@@ -40,6 +41,6 @@ if (process.env.MARKET) {
     postOnly: true,
   })
   console.log('order', order)
-  console.log('open orders', (await kairos.wallet.orders(wallet, { open: true })).length)
+  console.log('open orders', (await kairos.wallet.orders(wallet, { open: true })).length) // first read signs in once
   console.log('cancel', await kairos.wallet.cancel(wallet, [order.orderId]))
 }
