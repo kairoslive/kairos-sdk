@@ -1,5 +1,5 @@
 // Wallet API (/v3): Kairos sends what to sign, the wallet signs it, the SDK sends it back.
-// Actions need only the wallet's signature; reading orders and positions needs a SIWE login (`login`).
+// Actions need only the wallet's signature; reading orders and positions needs a one-signature `login`.
 
 import { Http, KairosError, type FetchLike, type Query } from "./http.ts";
 
@@ -26,6 +26,7 @@ export interface OrderInput {
 }
 
 export type Action =
+  | { type: "login" }
   | { type: "setup" }
   | ({ type: "order" } & Omit<OrderInput, "price" | "size"> & { price: string; size: string })
   | { type: "cancel"; orderIds: string[] }
@@ -102,12 +103,11 @@ export interface WalletPositions {
   [key: string]: unknown;
 }
 
-/** The API key that unlocks a wallet's orders and positions. Treat it as a secret. */
+/** What a `login` returns: a read-only token for one wallet's orders and positions. */
 export interface WalletCredentials {
-  clientId: string;
-  apiKey: string;
-  apiSecret: string;
-  /** ISO time after which the key stops working. */
+  /** Send as `Authorization: SIWE <token>`. */
+  token: string;
+  /** ISO time after which the token stops working. */
   expiresAt: string;
 }
 
@@ -135,7 +135,7 @@ export interface WalletClientOptions {
   pollIntervalMs?: number;
   /** Give up on an action after this long. Default 10 minutes (actions expire after 15). */
   timeoutMs?: number;
-  /** Called after each login with the new key, e.g. to keep it in secure storage and pass it back via `useCredentials`. */
+  /** Called after each login with the new token, e.g. to keep it and pass it back via `useCredentials`. */
   onLogin?: (wallet: string, credentials: WalletCredentials) => void;
   fetch?: FetchLike;
 }
@@ -161,8 +161,8 @@ export class WalletClient {
   }
 
   /**
-   * Sign in with Ethereum (one `personal_sign`) and keep the wallet's API key for `orders` and `positions`.
-   * The wallet must be set up first. A new login replaces the wallet's previous key.
+   * Sign in with Ethereum (one `personal_sign`) and keep the read token for `orders` and `positions`.
+   * The wallet must be set up first.
    */
   login(wallet: string): Promise<WalletCredentials> {
     // Concurrent reads share one sign-in: a second would revoke the first one's key.
@@ -176,20 +176,13 @@ export class WalletClient {
   }
 
   private async signIn(wallet: string): Promise<WalletCredentials> {
-    const { message } = await this.http.post<{ message: string }>("/v2/auth/siwe/challenge", { address: wallet });
-    const signature = await this.provider.request({ method: "personal_sign", params: [utf8ToHex(message), wallet] });
-    if (typeof signature !== "string") throw new Error("wallet returned a non-string signature");
-    const key = await this.http.post<{ client_id: string; api_key: string; api_secret: string; expires_at: string }>(
-      "/v2/auth/siwe/verify",
-      { message, signature_hex: signature },
-    );
-    const credentials = { clientId: key.client_id, apiKey: key.api_key, apiSecret: key.api_secret, expiresAt: key.expires_at };
+    const credentials = await this.run<WalletCredentials>(wallet, { type: "login" });
     this.useCredentials(wallet, credentials);
     this.onLogin?.(wallet, credentials);
     return credentials;
   }
 
-  /** Reuse a key from an earlier `login` (e.g. restored from secure storage). */
+  /** Reuse a token from an earlier `login` (e.g. restored from storage). */
   useCredentials(wallet: string, credentials: WalletCredentials): void {
     this.credentials.set(wallet.toLowerCase(), credentials);
   }
@@ -241,7 +234,7 @@ export class WalletClient {
     try {
       return await this.http.get<T>(path, query, authHeaders(credentials!));
     } catch (e) {
-      // A key replaced by a login elsewhere answers 401: log in once more.
+      // A token this node no longer accepts answers 401: log in once more.
       if (fresh || !(e instanceof KairosError) || e.status !== 401) throw e;
       return this.http.get<T>(path, query, authHeaders(await this.login(wallet)));
     }
@@ -282,13 +275,7 @@ export class WalletClient {
 }
 
 function authHeaders(c: WalletCredentials): Record<string, string> {
-  return { "x-client-id": c.clientId, "x-api-key": c.apiKey, "x-api-secret": c.apiSecret };
-}
-
-function utf8ToHex(text: string): string {
-  let hex = "0x";
-  for (const byte of new TextEncoder().encode(text)) hex += byte.toString(16).padStart(2, "0");
-  return hex;
+  return { authorization: `SIWE ${c.token}` };
 }
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
