@@ -28,3 +28,11 @@ test("trades and candles answer for a live market", async () => {
   const trades = await md.trades({ provider: "polymarket", contractId: markets[0].market_id, limit: 5 });
   assert.ok(trades && typeof trades === "object");
 });
+
+test("trader positions answer with performance and closed positions", async () => {
+  const traders = createKairos({ dataUrl: process.env.KAIROS_DATA_URL }).traders;
+  // A Kairos pilot trading wallet with a closed position.
+  const res = await traders.positions("0xe8206a62c75d1688166489b6006cedb4e86981cd");
+  assert.ok(res.performance && typeof res.performance.total_realized_pnl === "string");
+  assert.ok(Array.isArray(res.closed_positions));
+});
