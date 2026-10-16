@@ -1,13 +1,16 @@
-// Kairos SDK: one package for market data, wallet trading (/v3) and external signing (/v2).
+// Kairos SDK: one package for market data, trader stats, wallet trading (/v3) and external signing (/v2).
 // No runtime dependencies.
 
 import { MarketDataClient, type MarketDataOptions } from "./markets.ts";
+import { TraderClient } from "./traders.ts";
 import { WalletClient, type WalletClientOptions } from "./wallets.ts";
 import type { FetchLike } from "./http.ts";
 
 export interface KairosOptions {
   /** Market data base URL. Default `https://md.kairos.trade`. */
   marketDataUrl?: string;
+  /** Data API base URL (trader stats). Default `https://data.kairos.trade`. */
+  dataUrl?: string;
   /** Wallet API: your Kairos base URL, partner id and the wallet's EIP-1193 provider. */
   wallet?: Omit<WalletClientOptions, "fetch">;
   fetch?: FetchLike;
@@ -15,16 +18,20 @@ export interface KairosOptions {
 
 export interface Kairos {
   markets: MarketDataClient;
+  /** Public trader stats: positions with realized P&L, open and closed. */
+  traders: TraderClient;
   /** Present when `wallet` options were passed. */
   wallet: WalletClient;
 }
 
-/** Build a client. `markets` always works; `wallet` needs `wallet` options. */
+/** Build a client. `markets` and `traders` always work; `wallet` needs `wallet` options. */
 export function createKairos(opts: KairosOptions = {}): Kairos {
   const markets = new MarketDataClient({ baseUrl: opts.marketDataUrl, fetch: opts.fetch } satisfies MarketDataOptions);
+  const traders = new TraderClient({ baseUrl: opts.dataUrl, fetch: opts.fetch });
   const wallet = opts.wallet ? new WalletClient({ ...opts.wallet, fetch: opts.fetch }) : undefined;
   return {
     markets,
+    traders,
     get wallet(): WalletClient {
       if (!wallet) throw new Error("pass `wallet: { baseUrl, partnerId, provider }` to createKairos to use the wallet API");
       return wallet;
@@ -67,5 +74,15 @@ export {
   type Timeframe,
   type TradesQuery,
 } from "./markets.ts";
+
+export {
+  TraderClient,
+  DATA_URL,
+  type TraderClientOptions,
+  type TraderPerformance,
+  type TraderPosition,
+  type TraderPositions,
+  type TraderPositionsQuery,
+} from "./traders.ts";
 
 export * as signing from "./signing/index.ts";

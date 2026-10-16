@@ -1,6 +1,6 @@
 # Kairos SDK
 
-One TypeScript package for Kairos: market data, wallet trading, and external signing. No runtime dependencies, works in browsers and Node 20+.
+One TypeScript package for Kairos: market data, trader stats, wallet trading, and external signing. No runtime dependencies, works in browsers and Node 20+.
 
 ```bash
 npm install @kairos.trade/sdk
@@ -31,6 +31,23 @@ for await (const m of kairos.markets.all('kalshi')) {
 ```
 
 Market data prices are on a 0–100 scale. Orders use 0–1.
+
+## Trader stats
+
+Public, no key. Positions with realized and unrealized P&L, including closed ones, plus lifetime totals.
+
+```ts
+const { tradingWallet } = await kairos.wallet.status(wallet)
+
+const { performance, open_positions, closed_positions } = await kairos.traders.positions(tradingWallet)
+console.log(performance.total_realized_pnl, performance.win_rate)
+
+for await (const p of kairos.traders.closedPositions(tradingWallet)) {
+  // every closed position: entry_price, realized_pnl, closed_at…
+}
+```
+
+Pass the **trading wallet**, not the signing wallet: that's the address that holds the shares. The wallet API's `positions` read drops a position's P&L once it closes; this keeps it. Rate limited to 30 requests a minute per IP.
 
 ## Wallet trading
 
