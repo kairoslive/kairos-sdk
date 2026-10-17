@@ -113,6 +113,7 @@ export interface VenueStatus {
   currency?: string;
   available?: boolean;
   error?: string;
+  /** Venue specifics, e.g. `transferFromPerps: { available }` on Hyperliquid when perps USDC can cover what spot cannot. */
   venueDetail?: Record<string, unknown>;
 }
 
