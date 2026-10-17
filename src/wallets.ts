@@ -69,7 +69,7 @@ export interface VenueSetup {
   ready: boolean;
   /** Where to send this venue's collateral. */
   tradingWallet?: string;
-  next?: "setup" | "wait" | "fund" | null;
+  next?: "setup" | "wait" | "fund" | "blocked" | null;
   error?: string;
   venueDetail?: Record<string, unknown>;
   [key: string]: unknown;
@@ -106,7 +106,7 @@ export interface CancelResult {
 /** One venue's readiness and balance. */
 export interface VenueStatus {
   ready: boolean;
-  next: "setup" | "wait" | "fund" | null;
+  next: "setup" | "wait" | "fund" | "blocked" | null;
   tradingWallet?: string;
   /** Collateral balance in whole units (`currency`). */
   balance: string | null;
@@ -124,8 +124,8 @@ export interface WalletStatus {
   ready: boolean;
   /** Polymarket pUSD balance of the trading wallet, when known. */
   balance?: string | null;
-  /** What the wallet needs next: `"setup"`, `"wait"` (approvals it sent are confirming; nothing to sign), `"fund"`, or `null` when it can trade. */
-  next: "setup" | "wait" | "fund" | null;
+  /** What the wallet needs next: `"setup"`, `"wait"` (approvals it sent are confirming; nothing to sign), `"fund"`, `"blocked"` (the venue account cannot be used here; see `venueDetail.reason`), or `null` when it can trade. */
+  next: "setup" | "wait" | "fund" | "blocked" | null;
   venues?: Partial<Record<Venue, VenueStatus>>;
 }
 
