@@ -12,13 +12,13 @@ export interface Eip1193Provider {
 export type Side = "buy" | "sell";
 export type TimeInForce = "GTC" | "GTD" | "FOK" | "FAK" | "IOC";
 
-export type Venue = "polymarket" | "predictfun";
+export type Venue = "polymarket" | "predictfun" | "hyperliquid";
 
 /** A market from the market data API, or its reference `venue:market_id` (a bare `0x…` condition id is Polymarket). */
 export type MarketRef = string | { exchange_id: string; market_id?: string | number; condition_id?: string };
 
 export interface OrderInput {
-  /** The market: an object from `markets.list`, or `venue:market_id` such as `predictfun:1027194`. */
+  /** The market: an object from `markets.list`, or `venue:market_id` such as `predictfun:1027194` or `hyperliquid:11422`. */
   market: MarketRef;
   /** Outcome name, e.g. `"Yes"`. */
   outcome: string;
