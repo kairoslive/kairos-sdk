@@ -209,3 +209,62 @@ test("createKairos: markets works without wallet options; wallet explains what i
   assert.throws(() => kairos.wallet, /baseUrl, partnerId, provider/);
   assert.throws(() => new WalletClient({ baseUrl: "x", partnerId: "", provider: fakeWallet().provider }), /partnerId/);
 });
+
+test("multi-venue: opts in with the version header and sends a market object as venue:market_id", async () => {
+  const { impl, calls } = fakeFetch([
+    (c) => (c.method === "POST" && c.url.endsWith("/v3/actions") ? [200, { id: "o9", type: "order", status: "done", request: null, description: null, result: { orderId: "o1", status: "open", venueOrderId: null, venue: "predictfun", market: "predictfun:1027194" }, error: null }] : undefined),
+  ]);
+  const { provider } = fakeWallet();
+  const client = new WalletClient({ baseUrl: "https://exec.test", partnerId: "acme", provider, fetch: impl });
+  const result = await client.order(WALLET, { market: { exchange_id: "predictfun", market_id: "1027194", condition_id: "0xe65f" }, outcome: "Yes", side: "buy", price: "0.5", size: 2 });
+  assert.equal(result.venue, "predictfun");
+  assert.equal(calls[0].headers["x-kairos-wallet-api"], "2");
+  assert.equal((calls[0].body as { action: { market: string } }).action.market, "predictfun:1027194");
+});
+
+test("multi-venue: switches chain, sends approvals with wallet_sendCalls, falls back to one transaction each", async () => {
+  const sendCalls = { method: "wallet_sendCalls", params: [{ chainId: "0x38", calls: [{}, {}] }] };
+  const fallback = [
+    { method: "eth_sendTransaction", params: [{ to: "0x1" }] },
+    { method: "eth_sendTransaction", params: [{ to: "0x2" }] },
+  ];
+  const { impl, calls } = fakeFetch([
+    (c) => (c.method === "POST" && c.url.endsWith("/v3/actions") ? [200, { id: "s1", type: "setup", status: "needs_signature", request: sendCalls, chainId: "0x38", fallbackRequests: fallback, venue: "predictfun", description: "Approve", result: null, error: null }] : undefined),
+    (c) => (c.method === "POST" && c.url.endsWith("/v3/actions/s1") ? [200, { id: "s1", type: "setup", status: "done", request: null, description: null, result: { ready: true, venues: { predictfun: { ready: true } } }, error: null }] : undefined),
+  ]);
+  const seen: string[] = [];
+  const provider: Eip1193Provider = {
+    async request(args) {
+      seen.push(args.method);
+      if (args.method === "eth_chainId") return "0x89";
+      if (args.method === "wallet_sendCalls") throw Object.assign(new Error("unsupported"), { code: 4200 });
+      if (args.method === "eth_sendTransaction") return "0xhash" + seen.length;
+      return null;
+    },
+  };
+  const client = new WalletClient({ baseUrl: "https://exec.test", partnerId: "acme", provider, fetch: impl });
+  const result = await client.setup(WALLET, { venues: ["predictfun"] });
+  assert.equal(result.ready, true);
+  assert.deepEqual(seen, ["eth_chainId", "wallet_switchEthereumChain", "wallet_sendCalls", "eth_sendTransaction", "eth_sendTransaction"]);
+  assert.deepEqual((calls[0].body as { action: unknown }).action, { type: "setup", venues: ["predictfun"] });
+  assert.deepEqual(calls[1].body, { result: ["0xhash4", "0xhash5"] });
+});
+
+test("multi-venue: a wallet that does not know the chain adds it", async () => {
+  const seen: string[] = [];
+  const { impl } = fakeFetch([
+    (c) => (c.method === "POST" && c.url.endsWith("/v3/actions") ? [200, { id: "o1", type: "order", status: "needs_signature", request: signRequest, chainId: "0x38", description: "Confirm", result: null, error: null }] : undefined),
+    (c) => (c.method === "POST" && c.url.endsWith("/v3/actions/o1") ? [200, { id: "o1", type: "order", status: "done", request: null, description: null, result: { orderId: "x", status: "open", venueOrderId: null }, error: null }] : undefined),
+  ]);
+  const provider: Eip1193Provider = {
+    async request(args) {
+      seen.push(args.method);
+      if (args.method === "eth_chainId") return "0x1";
+      if (args.method === "wallet_switchEthereumChain" && !seen.includes("wallet_addEthereumChain")) throw Object.assign(new Error("unknown chain"), { code: 4902 });
+      return "0x" + "11".repeat(65);
+    },
+  };
+  const client = new WalletClient({ baseUrl: "https://exec.test", partnerId: "acme", provider, fetch: impl });
+  await client.order(WALLET, { market: "predictfun:7", outcome: "Yes", side: "buy", price: "0.5", size: "1" });
+  assert.deepEqual(seen, ["eth_chainId", "wallet_switchEthereumChain", "wallet_addEthereumChain", "eth_signTypedData_v4"]);
+});

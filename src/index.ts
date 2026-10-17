@@ -60,6 +60,12 @@ export {
   type WalletPositions,
   type WalletCredentials,
   type WalletStatus,
+  type Venue,
+  type VenueSetup,
+  type VenueStatus,
+  type MarketRef,
+  type Eip1193Request,
+  marketRef,
 } from "./wallets.ts";
 
 export {
