@@ -1,6 +1,6 @@
 {
   "name": "@kairos.trade/sdk",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Kairos SDK: market data, trader stats, wallet trading (sign-what-we-send) and external signing. No runtime dependencies.",
   "repository": {
     "type": "git",
