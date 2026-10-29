@@ -3,7 +3,7 @@
 // One setup, order, cancel and read cover every venue; the venue comes from the market.
 
 import { Http, KairosError, type FetchLike, type Query, type RequestOptions } from "./http.ts";
-import { marketRef, signWith, sleep, switchChain, type CallOptions, type Eip1193Provider, type Eip1193Request, type MarketRef } from "./common.ts";
+import { isTransient, marketRef, onChain, retryTransient, signWith, sleep, type CallOptions, type Eip1193Provider, type Eip1193Request, type MarketRef } from "./common.ts";
 import { FeesClient } from "./fees.ts";
 import { TradePlansClient } from "./trade-plans.ts";
 import { OnchainIntentsClient } from "./onchain-intents.ts";
@@ -513,8 +513,9 @@ export class WalletClient {
   async run<R = unknown>(wallet: string, action: Action, opts: CallOptions = {}): Promise<R> {
     const signal = this.signalFor(opts);
     const deadline = Date.now() + this.timeoutMs;
+    const read = (id: string) => retryTransient(() => this.getAction<R>(id, { signal }), deadline, this.pollIntervalMs, signal);
     let step = await this.http.post<Step<R>>("/v3/actions", { wallet, action }, undefined, signal);
-    // An answer refused as busy, re-sent instead of prompting the wallet again if the same request is still open.
+    // An answer that got no clean reply, re-sent instead of prompting the wallet again if the same request is still open.
     let retry: { request: string; answer: StepAnswer } | undefined;
     let busy = 0;
     for (;;) {
@@ -530,27 +531,28 @@ export class WalletClient {
           retry = undefined;
           if (!answer) {
             this.onStep?.(step);
-            if (step.chainId) await switchChain(this.provider, step.chainId);
-            answer = await this.answer(step);
+            const open = step;
+            answer = await onChain(this.provider, open.chainId, () => this.answer(open), signal);
           }
           try {
             step = await this.http.post<Step<R>>(`/v3/actions/${step.id}`, answer, undefined, signal);
             busy = 0;
           } catch (e) {
-            // Another request holds the action: read it and carry on from where it is.
-            if (!isBusy(e) || ++busy > MAX_BUSY_RETRIES) throw e;
+            // Another request holds the action, or the answer may have landed unseen: read it and carry on from where it is.
+            if (!(isBusy(e) || isTransient(e)) || ++busy > MAX_BUSY_RETRIES) throw e;
+            signal?.throwIfAborted();
             retry = { request: key, answer };
             await sleep(Math.min(this.pollIntervalMs, 1000), signal);
-            step = await this.getAction<R>(step.id, { signal });
+            step = await read(step.id);
           }
           break;
         }
         case "working": {
           const now = Date.now();
-          if (now > deadline) throw new ActionFailedError({ ...step, error: "timed out waiting for the action" });
+          if (now > deadline) throw new ActionFailedError({ ...step, error: "timed out waiting for the action", errorCode: timeoutCode(step) });
           const wait = step.holdUntilMs && step.holdUntilMs > now ? Math.max(MIN_HOLD_WAIT_MS, step.holdUntilMs - now) : this.pollIntervalMs;
           await sleep(Math.min(wait, Math.max(0, deadline - now) + 1), signal);
-          step = await this.getAction<R>(step.id, { signal });
+          step = await read(step.id);
           break;
         }
         default:
@@ -587,6 +589,13 @@ type StepAnswer = { signature: string } | { result: unknown };
 
 function isBusy(e: unknown): boolean {
   return e instanceof KairosError && e.status === 409 && /busy/i.test(e.message);
+}
+
+// A working order or cancel may still land after the client stops waiting.
+function timeoutCode(step: Step): ActionErrorCode | undefined {
+  if (step.type === "order") return "ORDER_OUTCOME_UNKNOWN";
+  if (step.type === "cancel") return "CANCEL_OUTCOME_UNKNOWN";
+  return step.errorCode;
 }
 
 function isUnsupported(e: unknown): boolean {

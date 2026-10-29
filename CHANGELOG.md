@@ -22,4 +22,8 @@
 - When the server answers `409` "this action is busy", the SDK reads the action and sends the same answer again, without asking the wallet a second time.
 - `KairosError.outcomeUnknown` is now true only for `500`, `502`, `504` and `408`, or for a body coded `ORDER_OUTCOME_UNKNOWN` or `CANCEL_OUTCOME_UNKNOWN`. A `503` means the request was refused before it reached a venue.
 - Error bodies that are plain text keep the text as the message.
+- `fees.settle` throws `SafetyCheckError` before the wallet is asked when the settlement's request is anything but one transfer of the owed amount to the treasury.
+- Wallet prompts on one provider run one at a time, so a concurrent call cannot switch chain between another call's switch and its signature. An aborted call waiting its turn never prompts.
+- Reads while waiting retry network drops, `408`, `429`, `502`, `503` and `504` until the timeout. An action answer or a plan or intent `execute` that gets no clean reply is read back or sent again (both are idempotent) instead of failing.
+- An order or cancel still working when `timeoutMs` runs out throws `ActionFailedError` with `outcomeUnknown` true.
 - `Step.chainId` and `Step.venue` are always present (nullable).

@@ -1,7 +1,21 @@
 // Fees (/v3/fees), preview: trading fees on trade plans accrue as debt per wallet and venue, paid in one settlement.
 // Polymarket settles with one gasless signature; Predict.fun with one transfer the wallet sends (it pays BNB gas).
 
-import { signWith, sleep, switchChain, WaitTimeoutError, lowerAddress, type CallOptions, type Eip1193Request } from "./common.ts";
+import {
+  SafetyCheckError,
+  WaitTimeoutError,
+  lowerAddress,
+  onChain,
+  retryTransient,
+  sameHex,
+  signWith,
+  sleep,
+  typedDoc,
+  uintValue,
+  type CallOptions,
+  type Eip1193Request,
+} from "./common.ts";
+import { PUSD_LOWER } from "./signing/polymarket-contracts.generated.ts";
 import type { WalletContext } from "./wallets.ts";
 
 export { FeeSettlementRequiredError } from "./http.ts";
@@ -73,6 +87,12 @@ export interface SettleOptions extends CallOptions {
 
 const TERMINAL: ReadonlySet<FeeSettlementStatus> = new Set(["confirmed", "failed", "expired"]);
 
+// The collateral each venue settles in, and the chain it is paid on.
+const RAILS: Record<FeeVenue, { chainId: bigint; token: string }> = {
+  polymarket: { chainId: 137n, token: PUSD_LOWER },
+  predictfun: { chainId: 56n, token: "0x55d398326f99059ff775485246999027b3197955" },
+};
+
 /**
  * Preview: staging only for now. Requests carry the wallet's login token (partner id) or your API key, which must own the
  * wallet and have `trade:read` for reads and `trade:execute` for writes.
@@ -119,7 +139,9 @@ export class FeesClient {
   async settle(wallet: string, venue: FeeVenue, opts: SettleOptions = {}): Promise<FeeSettlement> {
     let settlement = await this.createSettlement(wallet, venue, opts);
     if (settlement.status === "awaiting_signature" && settlement.walletRequest) {
-      settlement = await this.answerSettlement(settlement.id, { wallet, ...(await this.runWalletRequest(settlement.walletRequest)) }, opts);
+      checkSettlement(settlement, venue, lowerAddress(wallet, "wallet"));
+      const paid = await this.runWalletRequest(settlement.walletRequest, this.ctx.signal(opts));
+      settlement = await this.answerSettlement(settlement.id, { wallet, ...paid }, opts);
     }
     return this.wait(settlement.id, wallet, opts, settlement);
   }
@@ -140,23 +162,82 @@ export class FeesClient {
   /** Read a settlement until it is final. */
   async wait(id: string, wallet: string, opts: SettleOptions = {}, last?: FeeSettlement): Promise<FeeSettlement> {
     const signal = this.ctx.signal(opts);
+    const interval = opts.pollIntervalMs ?? this.ctx.pollIntervalMs;
     const deadline = Date.now() + (opts.timeoutMs ?? this.ctx.timeoutMs);
-    let settlement = last ?? (await this.getSettlement(id, wallet, { signal }));
+    const read = () => retryTransient(() => this.getSettlement(id, wallet, { signal }), deadline, interval, signal);
+    let settlement = last ?? (await read());
     while (!TERMINAL.has(settlement.status)) {
       // An unsigned settlement does not move on its own.
       if (settlement.status === "awaiting_signature") return settlement;
       if (Date.now() >= deadline) throw new WaitTimeoutError(`fee settlement ${id} is still ${settlement.status}`, settlement);
-      await sleep(opts.pollIntervalMs ?? this.ctx.pollIntervalMs, signal);
-      settlement = await this.getSettlement(id, wallet, { signal });
+      await sleep(interval, signal);
+      settlement = await read();
     }
     return settlement;
   }
 
-  private async runWalletRequest(req: FeeWalletRequest): Promise<{ signature: string } | { transactionHash: string }> {
-    await switchChain(this.ctx.provider, req.chainId);
-    if (req.kind === "signature") return { signature: await signWith(this.ctx.provider, req.request) };
-    const hash = await this.ctx.provider.request(req.request);
-    if (typeof hash !== "string") throw new Error("wallet returned a non-string transaction hash");
-    return { transactionHash: hash };
+  private runWalletRequest(req: FeeWalletRequest, signal?: AbortSignal): Promise<{ signature: string } | { transactionHash: string }> {
+    return onChain(
+      this.ctx.provider,
+      req.chainId,
+      async () => {
+        if (req.kind === "signature") return { signature: await signWith(this.ctx.provider, req.request) };
+        const hash = await this.ctx.provider.request(req.request);
+        if (typeof hash !== "string") throw new Error("wallet returned a non-string transaction hash");
+        return { transactionHash: hash };
+      },
+      signal,
+    );
   }
+}
+
+/** Refuse a settlement whose wallet request is anything but one transfer of the owed amount to the treasury. */
+function checkSettlement(s: FeeSettlement, venue: FeeVenue, wallet: string): void {
+  const refuse = (why: string): never => {
+    throw new SafetyCheckError(`refusing to pay fee settlement ${s.id}: ${why}`, s);
+  };
+  const rail = RAILS[venue];
+  const req = s.walletRequest!;
+  if (s.venue !== venue) refuse(`it is for ${s.venue}`);
+  if (!sameHex(s.token, rail.token) || uintValue(s.chainId) !== rail.chainId) refuse("it pays in another asset");
+  if (uintValue(req.chainId) !== rail.chainId) refuse("it signs on another chain");
+  if (uintValue(s.amountRaw) === undefined || uintValue(s.amountRaw) === 0n) refuse("its amount is not a positive integer");
+  const transfer = transferData(s.treasury, s.amountRaw);
+  if (venue === "polymarket") {
+    const doc = typedDoc(req.request);
+    if (req.kind !== "signature" || !doc || !sameHex(req.request.params[0], wallet)) refuse("it is not a signature by this wallet");
+    const calls = doc!.message?.calls as { target?: unknown; value?: unknown; data?: unknown }[] | undefined;
+    const ok =
+      doc!.primaryType === "Batch" &&
+      doc!.domain?.name === "DepositWallet" &&
+      uintValue(doc!.domain?.chainId) === rail.chainId &&
+      sameHex(doc!.domain?.verifyingContract, s.holdingWallet) &&
+      sameHex(doc!.message?.wallet, s.holdingWallet) &&
+      Array.isArray(calls) &&
+      calls.length === 1 &&
+      sameHex(calls[0].target, rail.token) &&
+      uintValue(calls[0].value) === 0n &&
+      sameHex(calls[0].data, transfer);
+    if (!ok) refuse("the batch is not a single transfer of the owed amount to the treasury");
+  } else {
+    const tx = req.request.params[0] as Record<string, unknown> | undefined;
+    const ok =
+      req.kind === "transaction" &&
+      req.request.method === "eth_sendTransaction" &&
+      req.request.params.length === 1 &&
+      !!tx &&
+      sameHex(tx.from, wallet) &&
+      sameHex(s.holdingWallet, wallet) &&
+      sameHex(tx.to, rail.token) &&
+      (tx.value === undefined || uintValue(tx.value) === 0n) &&
+      (tx.chainId === undefined || uintValue(tx.chainId) === rail.chainId) &&
+      sameHex(tx.data, transfer);
+    if (!ok) refuse("the transaction is not a single transfer of the owed amount to the treasury");
+  }
+}
+
+/** ERC-20 `transfer(to, amount)` calldata. */
+function transferData(to: string, amountRaw: string): string {
+  const amount = uintValue(amountRaw) ?? 0n;
+  return "0xa9059cbb" + to.toLowerCase().replace(/^0x/, "").padStart(64, "0") + amount.toString(16).padStart(64, "0");
 }

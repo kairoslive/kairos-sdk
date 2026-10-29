@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import { ActionFailedError, FeeSettlementRequiredError, KairosError, WalletClient } from "../src/index.ts";
-import { SIG, TOKEN, WALLET, fakeFetch, fakeWallet, loginRoutes, step } from "./helpers.ts";
+import { SIG, TOKEN, WALLET, fakeFetch, fakeWallet, loginRoutes, step, type Call } from "./helpers.ts";
 
 const KEY = { clientId: "cid", apiKey: "key", apiSecret: "secret" };
 const signRequest = { method: "eth_signTypedData_v4", params: [WALLET, "{}"] };
@@ -218,4 +218,87 @@ test("api key: wallet reads still sign in; preview routes send only the key", as
   assert.equal(calls.find((c) => c.path.endsWith("/orders"))!.headers.authorization, `SIWE ${TOKEN.token}`);
   await client.fees.summary(WALLET);
   assert.equal(calls.filter((c) => c.path === "/v3/fees")[1].headers.authorization, `SIWE ${TOKEN.token}`, "a token already held rides along");
+});
+
+/** A wallet whose chain is real state, so an interleaved switch shows up as a signature on the wrong chain. */
+function chainWallet() {
+  let chain = "0x1";
+  const signedOn: string[] = [];
+  const provider = {
+    async request(args: { method: string; params?: unknown[] }) {
+      if (args.method === "eth_chainId") return chain;
+      if (args.method === "wallet_switchEthereumChain") {
+        await new Promise((r) => setTimeout(r, 5));
+        chain = (args.params![0] as { chainId: string }).chainId;
+        return null;
+      }
+      await new Promise((r) => setTimeout(r, 5));
+      signedOn.push(`${JSON.parse(String(args.params![1])).want}@${chain}`);
+      return SIG;
+    },
+  };
+  return { provider, signedOn };
+}
+
+test("concurrency: two actions on one provider never sign between another's chain switch and signature", async () => {
+  const actionOn = (id: string, chainId: string) => [
+    (c: Call) => (c.method === "POST" && c.path === "/v3/actions" && (c.body as { action: { orderIds?: string[] } }).action.orderIds?.[0] === id ? [200, step({ id, type: "cancel", status: "needs_signature", chainId, request: { method: "eth_signTypedData_v4", params: [WALLET, JSON.stringify({ want: chainId })] } })] : undefined),
+    (c: Call) => (c.method === "POST" && c.path === `/v3/actions/${id}` ? [200, step({ id, status: "done", result: { cancelled: [id], failed: [] } })] : undefined),
+  ];
+  const { impl } = fakeFetch([...actionOn("a", "0x89"), ...actionOn("b", "0x38")] as never);
+  const { provider, signedOn } = chainWallet();
+  const client = new WalletClient({ baseUrl: "https://exec.test", partnerId: "acme", provider, fetch: impl });
+  await Promise.all([client.cancel(WALLET, ["a"]), client.cancel(WALLET, ["b"])]);
+  assert.deepEqual(signedOn.sort(), ["0x38@0x38", "0x89@0x89"]);
+});
+
+test("answer: a reply lost in transit is read back and the same signature re-sent, never a second prompt", async () => {
+  let answers = 0;
+  const { impl, calls } = fakeFetch([
+    (c) => (c.method === "POST" && c.path === "/v3/actions" ? [200, step({ status: "needs_signature", request: signRequest })] : undefined),
+    (c) => (c.method === "GET" ? [200, step({ status: "needs_signature", request: signRequest })] : undefined),
+    (c) => (c.method === "POST" && c.path === "/v3/actions/a1" ? (++answers === 1 ? [502, { error: "bad gateway" }] : [200, step({ status: "done", result: { orderId: "o1" } })]) : undefined),
+  ]);
+  const wallet = fakeWallet();
+  const client = new WalletClient({ baseUrl: "https://exec.test", partnerId: "acme", provider: wallet.provider, fetch: impl, pollIntervalMs: 1 });
+  assert.deepEqual(await client.order(WALLET, { market: "m", outcome: "Yes", side: "buy", price: "0.5", size: "1" }), { orderId: "o1" });
+  assert.equal(wallet.methods().filter((m) => m === "eth_signTypedData_v4").length, 1);
+  const sent = calls.filter((c) => c.path === "/v3/actions/a1" && c.method === "POST");
+  assert.equal(sent.length, 2);
+  assert.deepEqual(sent[0].body, sent[1].body);
+});
+
+test("timeout: an order still working when the client gives up is outcome-unknown, not a plain failure", async () => {
+  const { impl } = fakeFetch([() => [200, step({})]]);
+  const client = new WalletClient({ baseUrl: "https://exec.test", partnerId: "acme", provider: fakeWallet().provider, fetch: impl, pollIntervalMs: 1, timeoutMs: 20 });
+  await assert.rejects(client.order(WALLET, { market: "m", outcome: "Yes", side: "buy", price: "0.5", size: "1" }), (e: unknown) => e instanceof ActionFailedError && e.outcomeUnknown && e.errorCode === "ORDER_OUTCOME_UNKNOWN");
+});
+
+test("abort: a call queued behind another wallet prompt never prompts once aborted", async () => {
+  let release!: () => void;
+  const prompts: string[] = [];
+  const provider = {
+    async request(args: { method: string; params?: unknown[] }) {
+      if (args.method !== "eth_signTypedData_v4") return null;
+      prompts.push(String(args.params![1]));
+      if (prompts.length === 1) await new Promise<void>((r) => (release = r));
+      return SIG;
+    },
+  };
+  const { impl } = fakeFetch([
+    (c) => (c.method === "POST" && c.path === "/v3/actions" ? [200, step({ id: (c.body as { action: { orderIds: string[] } }).action.orderIds[0], status: "needs_signature", request: { method: "eth_signTypedData_v4", params: [WALLET, (c.body as { action: { orderIds: string[] } }).action.orderIds[0]] } })] : undefined),
+    (c) => (c.method === "POST" ? [200, step({ status: "done", result: { cancelled: [], failed: [] } })] : undefined),
+  ]);
+  const client = new WalletClient({ baseUrl: "https://exec.test", partnerId: "acme", provider, fetch: impl });
+  const first = client.cancel(WALLET, ["first"]);
+  await new Promise((r) => setTimeout(r, 20));
+  const controller = new AbortController();
+  const second = client.cancel(WALLET, ["second"], { signal: controller.signal });
+  await new Promise((r) => setTimeout(r, 20));
+  controller.abort(new Error("user left"));
+  await assert.rejects(second, /user left/);
+  release();
+  await first;
+  await new Promise((r) => setTimeout(r, 20));
+  assert.deepEqual(prompts, ["first"]);
 });

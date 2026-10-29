@@ -1,5 +1,7 @@
 // Helpers shared by the wallet API modules: EIP-1193 calls, chain switching, waits, and the value rules the server enforces.
 
+import { keccak256, toHex, utf8 } from "./signing/keccak.ts";
+
 /** Anything with an EIP-1193 `request`, e.g. `window.ethereum`, a WalletConnect provider, or a viem/ethers adapter. */
 export interface Eip1193Provider {
   request(args: { method: string; params?: unknown[] }): Promise<unknown>;
@@ -169,4 +171,153 @@ export function canonicalRaw(value: string | number | bigint, name: string, opts
     throw new Error(`${name} must be a canonical integer string in base units, got ${JSON.stringify(String(value))}`);
   }
   return s;
+}
+
+/** The server's canonical JSON: keys sorted by UTF-16 code units, no whitespace, safe integers only. */
+export function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    const keys = Object.keys(value).sort();
+    return `{${keys.map((k) => `${JSON.stringify(k)}:${canonicalJson((value as Record<string, unknown>)[k])}`).join(",")}}`;
+  }
+  if (typeof value === "number" && !Number.isSafeInteger(value)) throw new Error("JSON numbers must be safe integers");
+  if (value === undefined || typeof value === "function" || typeof value === "bigint") throw new Error(`${typeof value} is not JSON`);
+  return JSON.stringify(value);
+}
+
+/** keccak256 of the canonical JSON, as the server hashes plans, requests and intents. */
+export function valueHash(value: unknown): string {
+  return toHex(keccak256(utf8(canonicalJson(value))));
+}
+
+/** The server's `requestHash`: `{method, params}` hashed with the typed-data document canonicalized in place. */
+export function requestHash(request: Eip1193Request): string {
+  const params = [...request.params];
+  if (request.method === "eth_signTypedData_v4") {
+    if (typeof params[1] !== "string") throw new Error("typed data must be a JSON string");
+    params[1] = canonicalJson(JSON.parse(params[1]));
+  }
+  return valueHash({ method: request.method, params });
+}
+
+/** The typed-data request the server builds for `document`. */
+export function typedDataRequest(signer: string, document: unknown): Eip1193Request {
+  return { method: "eth_signTypedData_v4", params: [signer, canonicalJson(document)] };
+}
+
+/** True when two requests hash the same, i.e. the wallet would be asked to sign the same thing. */
+export function sameRequest(a: Eip1193Request, b: Eip1193Request): boolean {
+  try {
+    return requestHash(a) === requestHash(b);
+  } catch {
+    return false;
+  }
+}
+
+export interface TypedDoc {
+  types?: Record<string, unknown>;
+  primaryType?: string;
+  domain?: Record<string, unknown>;
+  message?: Record<string, unknown>;
+}
+
+/** The typed-data document of an `eth_signTypedData_v4` request, or undefined. */
+export function typedDoc(request: Eip1193Request): TypedDoc | undefined {
+  if (request.method !== "eth_signTypedData_v4" || typeof request.params[1] !== "string") return undefined;
+  try {
+    const doc = JSON.parse(request.params[1]);
+    return doc && typeof doc === "object" && !Array.isArray(doc) ? (doc as TypedDoc) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** A chain id or uint given as a safe integer, decimal string or `0x` hex, as a bigint; undefined when malformed. */
+export function uintValue(value: unknown): bigint | undefined {
+  if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) return BigInt(value);
+  if (typeof value === "string" && /^(0x[0-9a-fA-F]+|0|[1-9][0-9]*)$/.test(value)) return BigInt(value);
+  return undefined;
+}
+
+/** Unix seconds of an RFC 3339 timestamp, as a decimal string. */
+export function unixSeconds(at: string): string {
+  return String(Math.floor(Date.parse(at) / 1000));
+}
+
+/** Case-insensitive equality of two values that should be the same address or hex string. */
+export function sameHex(a: unknown, b: unknown): boolean {
+  return typeof a === "string" && typeof b === "string" && a.toLowerCase() === b.toLowerCase();
+}
+
+// One wallet prompt at a time per provider, so a concurrent call cannot switch chain between a switch and its signature.
+const walletLocks = new WeakMap<object, Promise<unknown>>();
+
+/** Run `fn` once every earlier prompt on `provider` has settled. An abort while queued means `fn` never runs. */
+export function withWallet<T>(provider: Eip1193Provider, fn: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+  const prev = walletLocks.get(provider) ?? Promise.resolve();
+  const next = prev.then(() => {
+    signal?.throwIfAborted();
+    return fn();
+  });
+  walletLocks.set(
+    provider,
+    next.catch(() => undefined),
+  );
+  return raceSignal(next, signal);
+}
+
+/** Switch to `chainId` (if given) and run `fn`, holding the provider so nothing else switches in between. */
+export function onChain<T>(provider: Eip1193Provider, chainId: string | null | undefined, fn: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+  return withWallet(
+    provider,
+    async () => {
+      if (chainId) await switchChain(provider, chainId);
+      return fn();
+    },
+    signal,
+  );
+}
+
+/** A failure worth repeating for a read or an idempotent write: no response at all, rate limited, or gateway trouble. */
+export function isTransient(e: unknown): boolean {
+  if (e instanceof TypeError) return true;
+  const status = (e as { status?: unknown })?.status;
+  return status === 408 || status === 429 || status === 502 || status === 503 || status === 504;
+}
+
+/** Run an idempotent request, repeating it after transient failures (backing off) until `deadline`; then the last error is thrown. */
+export async function retryTransient<T>(send: () => Promise<T>, deadline: number, intervalMs: number, signal?: AbortSignal): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await send();
+    } catch (e) {
+      signal?.throwIfAborted();
+      if (!isTransient(e) || Date.now() >= deadline) throw e;
+      const backoff = Math.min(Math.max(intervalMs, 250) * 2 ** attempt, 30_000);
+      await sleep(Math.min(backoff, Math.max(0, deadline - Date.now())), signal);
+    }
+  }
+}
+
+/** Settle with `promise`, or reject with the signal's reason when it aborts first. */
+export function raceSignal<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted) {
+    promise.catch(() => undefined);
+    return Promise.reject(signal.reason);
+  }
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (v) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(v);
+      },
+      (e) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(e);
+      },
+    );
+  });
 }

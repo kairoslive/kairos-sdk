@@ -1,0 +1,450 @@
+[
+  {
+    "answers": {
+      "answers": [
+        {
+          "kind": "signature",
+          "requestId": "plan",
+          "signature": "0xdf9e13d6e17c5294ee80a87f6c9856ed7f36ff2e0ce57f247f84a5a9e7682f6c2478d7228d31399cd1da3820e2fa62bf2905521b0dda7ac7d8362893e9ed5a8b1c"
+        },
+        {
+          "kind": "signature",
+          "requestId": "trade",
+          "signature": "0xe09dacdd8731b4d1d972464ff7c88b1b9bb892273460f5be18304747af897c5c0764badc6c1a57bf5c0f92bfa1ef908b34ab4eb4772381d72f5df6bb8007e3541c"
+        }
+      ],
+      "planHash": "0xbd57dbfa97ece5e747b70c770c337c662cc60ea093862e5a15925b3d42f1eba3"
+    },
+    "digests": {
+      "plan": "0x1722f48e2f7a20a77399b8b174930806428a9af3e63f648b7e0d5c9c845f2467",
+      "trade": "0xa3612e136ad81349bbc469dbc02ebd85d3cfcd3f76f90fc06a5c33d6bd03a67a"
+    },
+    "now": "2026-10-21T12:00:00Z",
+    "plan": {
+      "audience": "https://staging.api.example",
+      "contractVersion": 1,
+      "createdAt": "2026-10-21T12:00:00Z",
+      "error": null,
+      "executeBefore": "2026-10-21T12:00:30Z",
+      "execution": {
+        "committed": false,
+        "fundingStatus": "not_required",
+        "phase": "collecting",
+        "tradeStatus": "not_started"
+      },
+      "funding": null,
+      "id": "00000000-0000-0000-0000-00000000002a",
+      "interactionMode": "single_batch",
+      "order": {
+        "clientOrderId": "order-42",
+        "market": "polymarket:test",
+        "outcome": "Yes",
+        "postOnly": false,
+        "price": "0.5",
+        "side": "buy",
+        "size": "2",
+        "timeInForce": "GTC"
+      },
+      "partnerId": "acme",
+      "planHash": "0xbd57dbfa97ece5e747b70c770c337c662cc60ea093862e5a15925b3d42f1eba3",
+      "requests": [
+        {
+          "actionable": true,
+          "chainId": "0x89",
+          "collectAfter": [],
+          "executeAfter": [],
+          "id": "plan",
+          "kind": "signature",
+          "purpose": "plan",
+          "request": {
+            "method": "eth_signTypedData_v4",
+            "params": [
+              "0x4a62316623ad457f02cdc5d997ded67a383ec569",
+              "{\"domain\":{\"chainId\":137,\"name\":\"KairosTradePlan\",\"version\":\"1\"},\"message\":{\"audience\":\"https://staging.api.example\",\"executeBefore\":\"1792584030\",\"partnerId\":\"acme\",\"planHash\":\"0xbd57dbfa97ece5e747b70c770c337c662cc60ea093862e5a15925b3d42f1eba3\",\"planId\":\"00000000-0000-0000-0000-00000000002a\",\"tradeSubmitBefore\":\"1792584120\",\"wallet\":\"0x4a62316623ad457f02cdc5d997ded67a383ec569\"},\"primaryType\":\"TradePlan\",\"types\":{\"EIP712Domain\":[{\"name\":\"name\",\"type\":\"string\"},{\"name\":\"version\",\"type\":\"string\"},{\"name\":\"chainId\",\"type\":\"uint256\"}],\"TradePlan\":[{\"name\":\"wallet\",\"type\":\"address\"},{\"name\":\"partnerId\",\"type\":\"string\"},{\"name\":\"audience\",\"type\":\"string\"},{\"name\":\"planId\",\"type\":\"string\"},{\"name\":\"planHash\",\"type\":\"bytes32\"},{\"name\":\"executeBefore\",\"type\":\"uint256\"},{\"name\":\"tradeSubmitBefore\",\"type\":\"uint256\"}]}}"
+            ]
+          },
+          "requestHash": "0x2aa51d2e3217f5dd6f4961958aefbcf3b63e3ba77399bdae0322c0c9432a139b",
+          "signer": "0x4a62316623ad457f02cdc5d997ded67a383ec569",
+          "status": "ready"
+        },
+        {
+          "actionable": true,
+          "chainId": "0x89",
+          "collectAfter": [],
+          "executeAfter": [],
+          "id": "trade",
+          "kind": "signature",
+          "purpose": "trade",
+          "request": {
+            "method": "eth_signTypedData_v4",
+            "params": [
+              "0x4a62316623ad457f02cdc5d997ded67a383ec569",
+              "{\"domain\":{\"chainId\":137,\"name\":\"Venue\"},\"message\":{\"value\":\"1000000\"},\"primaryType\":\"Order\",\"types\":{\"EIP712Domain\":[{\"name\":\"name\",\"type\":\"string\"},{\"name\":\"chainId\",\"type\":\"uint256\"}],\"Order\":[{\"name\":\"value\",\"type\":\"uint256\"}]}}"
+            ]
+          },
+          "requestHash": "0x0949c4fc3fec5036e82047f68491e76ea6d7a10b11c8bb5c5b04aa62969a1297",
+          "signer": "0x4a62316623ad457f02cdc5d997ded67a383ec569",
+          "status": "ready"
+        }
+      ],
+      "revision": "0",
+      "status": "needs_signatures",
+      "submission": {
+        "funding": "kairos",
+        "trade": "kairos"
+      },
+      "tradeBudget": {
+        "collateral": {
+          "chainId": "137",
+          "kind": "evm",
+          "token": "0x0202020202020202020202020202020202020202"
+        },
+        "decimals": 6,
+        "existingSpendableRaw": "1000000",
+        "maxCollateralFeeRaw": "0",
+        "maxDebitRaw": "1000000",
+        "maxPlatformFeeBps": 0,
+        "notionalRaw": "1000000"
+      },
+      "tradeExecutionRegion": "us-east-1",
+      "tradePayloadDigest": "0xa3612e136ad81349bbc469dbc02ebd85d3cfcd3f76f90fc06a5c33d6bd03a67a",
+      "tradeSubmitBefore": "2026-10-21T12:02:00Z",
+      "tradingWallet": "0x4a62316623ad457f02cdc5d997ded67a383ec569",
+      "venue": "polymarket",
+      "wallet": "0x4a62316623ad457f02cdc5d997ded67a383ec569"
+    }
+  },
+  {
+    "answers": {
+      "answers": [
+        {
+          "kind": "signature",
+          "requestId": "plan",
+          "signature": "0xb2befc57fa7365cd671c908b8ba106005520bbd0fdb7212c8ea2134a6f2ff38a1b41a830b69eb1f51b7f1520681382729fdd1630ee70b131aac7b9059195de081c"
+        },
+        {
+          "kind": "signature",
+          "requestId": "trade",
+          "signature": "0xe09dacdd8731b4d1d972464ff7c88b1b9bb892273460f5be18304747af897c5c0764badc6c1a57bf5c0f92bfa1ef908b34ab4eb4772381d72f5df6bb8007e3541c"
+        },
+        {
+          "kind": "signature",
+          "requestId": "funding-authorization",
+          "signature": "0xe09dacdd8731b4d1d972464ff7c88b1b9bb892273460f5be18304747af897c5c0764badc6c1a57bf5c0f92bfa1ef908b34ab4eb4772381d72f5df6bb8007e3541c"
+        }
+      ],
+      "planHash": "0xb3d5c6e930ee2015f733bd9ffa2a2302fedd2a5bf38628e220f0b675d50f6953"
+    },
+    "digests": {
+      "funding-authorization": "0xa3612e136ad81349bbc469dbc02ebd85d3cfcd3f76f90fc06a5c33d6bd03a67a",
+      "plan": "0xb8ca0308a638c3c997a5f33167453b1fc3c13ec450ce3374b1b62f6aacebad40",
+      "trade": "0xa3612e136ad81349bbc469dbc02ebd85d3cfcd3f76f90fc06a5c33d6bd03a67a"
+    },
+    "now": "2026-10-21T12:00:00Z",
+    "plan": {
+      "audience": "https://staging.api.example",
+      "contractVersion": 1,
+      "createdAt": "2026-10-21T12:00:00Z",
+      "error": null,
+      "executeBefore": "2026-10-21T12:00:30Z",
+      "execution": {
+        "committed": false,
+        "fundingStatus": "not_required",
+        "phase": "collecting",
+        "tradeStatus": "not_started"
+      },
+      "funding": {
+        "amountInRaw": "1100000000000000000",
+        "destination": {
+          "chainId": "137",
+          "kind": "evm",
+          "token": "0x0202020202020202020202020202020202020202"
+        },
+        "destinationDecimals": 6,
+        "expectedArrivalRaw": "1001000",
+        "fundingSubmitBefore": "2026-10-21T12:00:30Z",
+        "maxAmountRaw": "1200000000000000000",
+        "maxGasCostRaw": "0",
+        "minimumArrivalRaw": "1000000",
+        "providerRequestId": "relay-42",
+        "quoteExpiresAt": "2026-10-21T12:00:30Z",
+        "quoteId": "quote-42",
+        "recipient": "0x4a62316623ad457f02cdc5d997ded67a383ec569",
+        "refundRecipient": "0x4a62316623ad457f02cdc5d997ded67a383ec569",
+        "requiredArrivalRaw": "1000000",
+        "slippageBps": 50,
+        "sourceChainId": "56",
+        "sourceDecimals": 18,
+        "sourceToken": "0x0303030303030303030303030303030303030303"
+      },
+      "id": "00000000-0000-0000-0000-00000000002a",
+      "interactionMode": "single_batch",
+      "order": {
+        "clientOrderId": "order-42",
+        "market": "polymarket:test",
+        "outcome": "Yes",
+        "postOnly": false,
+        "price": "0.5",
+        "side": "buy",
+        "size": "2",
+        "timeInForce": "GTC"
+      },
+      "partnerId": "acme",
+      "planHash": "0xb3d5c6e930ee2015f733bd9ffa2a2302fedd2a5bf38628e220f0b675d50f6953",
+      "requests": [
+        {
+          "actionable": true,
+          "chainId": "0x89",
+          "collectAfter": [],
+          "executeAfter": [],
+          "id": "plan",
+          "kind": "signature",
+          "purpose": "plan",
+          "request": {
+            "method": "eth_signTypedData_v4",
+            "params": [
+              "0x4a62316623ad457f02cdc5d997ded67a383ec569",
+              "{\"domain\":{\"chainId\":137,\"name\":\"KairosTradePlan\",\"version\":\"1\"},\"message\":{\"audience\":\"https://staging.api.example\",\"executeBefore\":\"1792584030\",\"partnerId\":\"acme\",\"planHash\":\"0xb3d5c6e930ee2015f733bd9ffa2a2302fedd2a5bf38628e220f0b675d50f6953\",\"planId\":\"00000000-0000-0000-0000-00000000002a\",\"tradeSubmitBefore\":\"1792584120\",\"wallet\":\"0x4a62316623ad457f02cdc5d997ded67a383ec569\"},\"primaryType\":\"TradePlan\",\"types\":{\"EIP712Domain\":[{\"name\":\"name\",\"type\":\"string\"},{\"name\":\"version\",\"type\":\"string\"},{\"name\":\"chainId\",\"type\":\"uint256\"}],\"TradePlan\":[{\"name\":\"wallet\",\"type\":\"address\"},{\"name\":\"partnerId\",\"type\":\"string\"},{\"name\":\"audience\",\"type\":\"string\"},{\"name\":\"planId\",\"type\":\"string\"},{\"name\":\"planHash\",\"type\":\"bytes32\"},{\"name\":\"executeBefore\",\"type\":\"uint256\"},{\"name\":\"tradeSubmitBefore\",\"type\":\"uint256\"}]}}"
+            ]
+          },
+          "requestHash": "0x164f42fed95c09f82995ceb0d79c95e4074f81d9165c7ec449ffe4f5e15ace6e",
+          "signer": "0x4a62316623ad457f02cdc5d997ded67a383ec569",
+          "status": "ready"
+        },
+        {
+          "actionable": true,
+          "chainId": "0x89",
+          "collectAfter": [],
+          "executeAfter": [],
+          "id": "trade",
+          "kind": "signature",
+          "purpose": "trade",
+          "request": {
+            "method": "eth_signTypedData_v4",
+            "params": [
+              "0x4a62316623ad457f02cdc5d997ded67a383ec569",
+              "{\"domain\":{\"chainId\":137,\"name\":\"Venue\"},\"message\":{\"value\":\"1000000\"},\"primaryType\":\"Order\",\"types\":{\"EIP712Domain\":[{\"name\":\"name\",\"type\":\"string\"},{\"name\":\"chainId\",\"type\":\"uint256\"}],\"Order\":[{\"name\":\"value\",\"type\":\"uint256\"}]}}"
+            ]
+          },
+          "requestHash": "0x0949c4fc3fec5036e82047f68491e76ea6d7a10b11c8bb5c5b04aa62969a1297",
+          "signer": "0x4a62316623ad457f02cdc5d997ded67a383ec569",
+          "status": "ready"
+        },
+        {
+          "actionable": true,
+          "chainId": "0x89",
+          "collectAfter": [],
+          "executeAfter": [],
+          "id": "funding-authorization",
+          "kind": "signature",
+          "purpose": "funding",
+          "request": {
+            "method": "eth_signTypedData_v4",
+            "params": [
+              "0x4a62316623ad457f02cdc5d997ded67a383ec569",
+              "{\"domain\":{\"chainId\":137,\"name\":\"Venue\"},\"message\":{\"value\":\"1000000\"},\"primaryType\":\"Order\",\"types\":{\"EIP712Domain\":[{\"name\":\"name\",\"type\":\"string\"},{\"name\":\"chainId\",\"type\":\"uint256\"}],\"Order\":[{\"name\":\"value\",\"type\":\"uint256\"}]}}"
+            ]
+          },
+          "requestHash": "0x0949c4fc3fec5036e82047f68491e76ea6d7a10b11c8bb5c5b04aa62969a1297",
+          "signer": "0x4a62316623ad457f02cdc5d997ded67a383ec569",
+          "status": "ready"
+        }
+      ],
+      "revision": "0",
+      "status": "needs_signatures",
+      "submission": {
+        "funding": "kairos",
+        "trade": "kairos"
+      },
+      "tradeBudget": {
+        "collateral": {
+          "chainId": "137",
+          "kind": "evm",
+          "token": "0x0202020202020202020202020202020202020202"
+        },
+        "decimals": 6,
+        "existingSpendableRaw": "0",
+        "maxCollateralFeeRaw": "0",
+        "maxDebitRaw": "1000000",
+        "maxPlatformFeeBps": 0,
+        "notionalRaw": "1000000"
+      },
+      "tradeExecutionRegion": "us-east-1",
+      "tradePayloadDigest": "0xa3612e136ad81349bbc469dbc02ebd85d3cfcd3f76f90fc06a5c33d6bd03a67a",
+      "tradeSubmitBefore": "2026-10-21T12:02:00Z",
+      "tradingWallet": "0x4a62316623ad457f02cdc5d997ded67a383ec569",
+      "venue": "polymarket",
+      "wallet": "0x4a62316623ad457f02cdc5d997ded67a383ec569"
+    }
+  },
+  {
+    "answers": {
+      "answers": [
+        {
+          "kind": "signature",
+          "requestId": "plan",
+          "signature": "0x2eac423904c366617f15f035ed598e360218b37d71d85f01e466783949e701951d2f58118739dd3fe218650d5398684b88e773ff0246c5c4e8ec3b48eccdc3841b"
+        },
+        {
+          "kind": "signature",
+          "requestId": "trade",
+          "signature": "0xe09dacdd8731b4d1d972464ff7c88b1b9bb892273460f5be18304747af897c5c0764badc6c1a57bf5c0f92bfa1ef908b34ab4eb4772381d72f5df6bb8007e3541c"
+        },
+        {
+          "kind": "signature",
+          "requestId": "funding-authorization",
+          "signature": "0xe09dacdd8731b4d1d972464ff7c88b1b9bb892273460f5be18304747af897c5c0764badc6c1a57bf5c0f92bfa1ef908b34ab4eb4772381d72f5df6bb8007e3541c"
+        }
+      ],
+      "planHash": "0x3e4b8d1b6562ee3659deda6f4b4441c55a124012d344f8a9d53236bde4bb15e4"
+    },
+    "digests": {
+      "funding-authorization": "0xa3612e136ad81349bbc469dbc02ebd85d3cfcd3f76f90fc06a5c33d6bd03a67a",
+      "plan": "0x9b667b7449de14838cffa035c67706d6cab4c064592ad1f93e59e9c841f777ae",
+      "trade": "0xa3612e136ad81349bbc469dbc02ebd85d3cfcd3f76f90fc06a5c33d6bd03a67a"
+    },
+    "now": "2026-10-21T12:00:00Z",
+    "plan": {
+      "audience": "https://staging.api.example",
+      "contractVersion": 1,
+      "createdAt": "2026-10-21T12:00:00Z",
+      "error": null,
+      "executeBefore": "2026-10-21T12:00:30Z",
+      "execution": {
+        "committed": false,
+        "fundingStatus": "not_required",
+        "phase": "collecting",
+        "tradeStatus": "not_started"
+      },
+      "funding": {
+        "amountInRaw": "1100000000000000000",
+        "destination": {
+          "chainId": "137",
+          "kind": "evm",
+          "token": "0x0202020202020202020202020202020202020202"
+        },
+        "destinationDecimals": 6,
+        "expectedArrivalRaw": "1001000",
+        "fundingSubmitBefore": "2026-10-21T12:00:30Z",
+        "maxAmountRaw": "1200000000000000000",
+        "maxGasCostRaw": "0",
+        "minimumArrivalRaw": "1000000",
+        "providerRequestId": "relay-42",
+        "quoteExpiresAt": "2026-10-21T12:00:30Z",
+        "quoteId": "quote-42",
+        "recipient": "0x4a62316623ad457f02cdc5d997ded67a383ec569",
+        "refundRecipient": "0x4a62316623ad457f02cdc5d997ded67a383ec569",
+        "requiredArrivalRaw": "1000000",
+        "slippageBps": 50,
+        "sourceChainId": "56",
+        "sourceDecimals": 18,
+        "sourceToken": "0x0303030303030303030303030303030303030303"
+      },
+      "id": "00000000-0000-0000-0000-00000000002a",
+      "interactionMode": "single_batch",
+      "order": {
+        "clientOrderId": "order-42",
+        "market": "polymarket:test",
+        "outcome": "Yes",
+        "postOnly": false,
+        "price": "0.5",
+        "side": "buy",
+        "size": "2",
+        "timeInForce": "GTC"
+      },
+      "partnerId": "acme",
+      "planHash": "0x3e4b8d1b6562ee3659deda6f4b4441c55a124012d344f8a9d53236bde4bb15e4",
+      "requests": [
+        {
+          "actionable": true,
+          "chainId": "0x89",
+          "collectAfter": [],
+          "executeAfter": [],
+          "id": "plan",
+          "kind": "signature",
+          "purpose": "plan",
+          "request": {
+            "method": "eth_signTypedData_v4",
+            "params": [
+              "0x4a62316623ad457f02cdc5d997ded67a383ec569",
+              "{\"domain\":{\"chainId\":137,\"name\":\"KairosTradePlan\",\"version\":\"1\"},\"message\":{\"audience\":\"https://staging.api.example\",\"executeBefore\":\"1792584030\",\"partnerId\":\"acme\",\"planHash\":\"0x3e4b8d1b6562ee3659deda6f4b4441c55a124012d344f8a9d53236bde4bb15e4\",\"planId\":\"00000000-0000-0000-0000-00000000002a\",\"tradeSubmitBefore\":\"1792584120\",\"wallet\":\"0x4a62316623ad457f02cdc5d997ded67a383ec569\"},\"primaryType\":\"TradePlan\",\"types\":{\"EIP712Domain\":[{\"name\":\"name\",\"type\":\"string\"},{\"name\":\"version\",\"type\":\"string\"},{\"name\":\"chainId\",\"type\":\"uint256\"}],\"TradePlan\":[{\"name\":\"wallet\",\"type\":\"address\"},{\"name\":\"partnerId\",\"type\":\"string\"},{\"name\":\"audience\",\"type\":\"string\"},{\"name\":\"planId\",\"type\":\"string\"},{\"name\":\"planHash\",\"type\":\"bytes32\"},{\"name\":\"executeBefore\",\"type\":\"uint256\"},{\"name\":\"tradeSubmitBefore\",\"type\":\"uint256\"}]}}"
+            ]
+          },
+          "requestHash": "0xe5edccdeb6e1c87c5e2472791ab6702bff9ac79ebf7ebc8875e88b5b1682e6e6",
+          "signer": "0x4a62316623ad457f02cdc5d997ded67a383ec569",
+          "status": "ready"
+        },
+        {
+          "actionable": true,
+          "chainId": "0x89",
+          "collectAfter": [],
+          "executeAfter": [],
+          "id": "trade",
+          "kind": "signature",
+          "purpose": "trade",
+          "request": {
+            "method": "eth_signTypedData_v4",
+            "params": [
+              "0x4a62316623ad457f02cdc5d997ded67a383ec569",
+              "{\"domain\":{\"chainId\":137,\"name\":\"Venue\"},\"message\":{\"value\":\"1000000\"},\"primaryType\":\"Order\",\"types\":{\"EIP712Domain\":[{\"name\":\"name\",\"type\":\"string\"},{\"name\":\"chainId\",\"type\":\"uint256\"}],\"Order\":[{\"name\":\"value\",\"type\":\"uint256\"}]}}"
+            ]
+          },
+          "requestHash": "0x0949c4fc3fec5036e82047f68491e76ea6d7a10b11c8bb5c5b04aa62969a1297",
+          "signer": "0x4a62316623ad457f02cdc5d997ded67a383ec569",
+          "status": "ready"
+        },
+        {
+          "actionable": true,
+          "chainId": "0x89",
+          "collectAfter": [],
+          "executeAfter": [],
+          "externalSubmission": {
+            "api": "swap",
+            "endpoint": "https://api.relay.link/execute/permits",
+            "kind": "eip3009",
+            "method": "POST",
+            "requestId": "relay-42"
+          },
+          "id": "funding-authorization",
+          "kind": "signature",
+          "purpose": "funding",
+          "request": {
+            "method": "eth_signTypedData_v4",
+            "params": [
+              "0x4a62316623ad457f02cdc5d997ded67a383ec569",
+              "{\"domain\":{\"chainId\":137,\"name\":\"Venue\"},\"message\":{\"value\":\"1000000\"},\"primaryType\":\"Order\",\"types\":{\"EIP712Domain\":[{\"name\":\"name\",\"type\":\"string\"},{\"name\":\"chainId\",\"type\":\"uint256\"}],\"Order\":[{\"name\":\"value\",\"type\":\"uint256\"}]}}"
+            ]
+          },
+          "requestHash": "0x0949c4fc3fec5036e82047f68491e76ea6d7a10b11c8bb5c5b04aa62969a1297",
+          "signer": "0x4a62316623ad457f02cdc5d997ded67a383ec569",
+          "status": "ready"
+        }
+      ],
+      "revision": "0",
+      "status": "needs_signatures",
+      "submission": {
+        "funding": "client",
+        "trade": "kairos"
+      },
+      "tradeBudget": {
+        "collateral": {
+          "chainId": "137",
+          "kind": "evm",
+          "token": "0x0202020202020202020202020202020202020202"
+        },
+        "decimals": 6,
+        "existingSpendableRaw": "0",
+        "maxCollateralFeeRaw": "0",
+        "maxDebitRaw": "1000000",
+        "maxPlatformFeeBps": 0,
+        "notionalRaw": "1000000"
+      },
+      "tradeExecutionRegion": "us-east-1",
+      "tradePayloadDigest": "0xa3612e136ad81349bbc469dbc02ebd85d3cfcd3f76f90fc06a5c33d6bd03a67a",
+      "tradeSubmitBefore": "2026-10-21T12:02:00Z",
+      "tradingWallet": "0x4a62316623ad457f02cdc5d997ded67a383ec569",
+      "venue": "polymarket",
+      "wallet": "0x4a62316623ad457f02cdc5d997ded67a383ec569"
+    }
+  }
+]

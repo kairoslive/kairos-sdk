@@ -9,18 +9,35 @@ import {
   idempotencyKey,
   lowerAddress,
   marketRef,
+  onChain,
   randomClientOrderId,
+  requestHash,
+  retryTransient,
   rfc3339,
+  sameHex,
+  sameRequest,
   secondsFromNow,
   signWith,
   sleep,
-  switchChain,
+  typedDataRequest,
+  typedDoc,
+  uintValue,
+  unixSeconds,
+  valueHash,
   type CallOptions,
   type Eip1193Request,
   type MarketRef,
+  type TypedDoc,
 } from "./common.ts";
 import type { TimeInForce, Venue, WalletContext } from "./wallets.ts";
+import {
+  CTF_EXCHANGE_V1_LOWER,
+  CTF_EXCHANGE_V2_LOWER,
+  NEG_RISK_CTF_EXCHANGE_V1_LOWER,
+  NEG_RISK_CTF_EXCHANGE_V2_LOWER,
+} from "./signing/polymarket-contracts.generated.ts";
 
+/** `needs_wallet_action` and `refunded` are reserved: the server does not send them today. */
 export type TradePlanStatus =
   | "needs_signatures"
   | "ready_to_execute"
@@ -93,7 +110,7 @@ export interface TradePlanInput {
   interactionMode?: "single_batch" | "allow_followup";
   /** The last moment Kairos may place the trade: at most 5 minutes out. Default: now + 240 s. */
   tradeSubmitBefore?: Date | number | string;
-  /** Confirmed on-chain intents (e.g. a split) whose credit this buy may count on. Polymarket only. */
+  /** Confirmed merge or redeem intents whose pUSD credit this buy may count on (a split spends pUSD, so it cannot). Polymarket only. */
   ctfDependencies?: string[];
 }
 
@@ -305,16 +322,18 @@ export class TradePlansClient {
   /** Read the plan until it is final. `completed` means the venue accepted the order, not that it filled. */
   async wait(id: string, wallet: string, opts: TradePlanWaitOptions = {}, last?: TradePlan): Promise<TradePlan> {
     const signal = this.ctx.signal(opts);
+    const interval = opts.pollIntervalMs ?? this.ctx.pollIntervalMs;
     const deadline = Date.now() + (opts.timeoutMs ?? this.ctx.timeoutMs);
-    let plan = last ?? (await this.get(id, wallet, { signal }));
+    const read = () => retryTransient(() => this.get(id, wallet, { signal }), deadline, interval, signal);
+    let plan = last ?? (await read());
     while (!TERMINAL.has(plan.status)) {
       // Unsigned or uncommitted plans do not move on their own.
       if (!plan.execution.committed && plan.status !== "needs_wallet_action") {
         if (Date.parse(plan.executeBefore) > Date.now()) return plan;
       }
       if (Date.now() >= deadline) throw new WaitTimeoutError(`trade plan ${id} is still ${plan.status}; read it, never repeat the order`, plan);
-      await sleep(opts.pollIntervalMs ?? this.ctx.pollIntervalMs, signal);
-      plan = await this.get(id, wallet, { signal });
+      await sleep(interval, signal);
+      plan = await read();
     }
     return plan;
   }
@@ -341,10 +360,14 @@ export class TradePlansClient {
       if (!req.actionable || req.status !== "ready") continue;
       if (req.kind !== "signature") throw new SafetyCheckError(`plan request ${req.id} asks for a ${req.kind}`, plan);
       opts.onSign?.(req, plan);
-      if (req.chainId) await switchChain(this.ctx.provider, req.chainId);
-      answers.push({ kind: "signature", requestId: req.id, signature: await signWith(this.ctx.provider, req.request) });
+      const signature = await onChain(this.ctx.provider, req.chainId, () => signWith(this.ctx.provider, req.request), signal);
+      answers.push({ kind: "signature", requestId: req.id, signature });
     }
-    plan = await this.execute(plan.id, body.wallet, plan.planHash, answers, { signal });
+    // Execute is idempotent, so a reply lost in transit is safe to ask for again.
+    const deadline = Math.min(Date.now() + (opts.timeoutMs ?? this.ctx.timeoutMs), Date.parse(plan.executeBefore) + 60_000);
+    const id = plan.id;
+    const planHash = plan.planHash;
+    plan = await retryTransient(() => this.execute(id, body.wallet, planHash, answers, { signal }), deadline, opts.pollIntervalMs ?? this.ctx.pollIntervalMs, signal);
     return this.wait(plan.id, body.wallet, opts, plan);
   }
 
@@ -417,6 +440,68 @@ function checkBps(bps: number): number {
   return bps;
 }
 
+/** The plan hash the server signs over: the plan without its live fields, requests reduced to their pinned parts. */
+export function tradePlanHash(plan: TradePlan): string {
+  const { planHash: _h, revision: _r, status: _s, execution: _e, error: _x, requests, ...pinned } = plan;
+  const reqs = requests
+    .filter((r) => r.purpose !== "plan")
+    .map((r) => ({
+      id: r.id,
+      purpose: r.purpose,
+      kind: r.kind,
+      signer: r.signer,
+      chainId: r.chainId ?? null,
+      requestHash: r.requestHash,
+      collectAfter: r.collectAfter,
+      executeAfter: r.executeAfter,
+      ...(r.externalSubmission ? { externalSubmission: r.externalSubmission } : {}),
+    }));
+  return valueHash({ ...pinned, requests: reqs });
+}
+
+/** The plan authorization the server asks the wallet to sign, rebuilt from the plan. */
+export function tradePlanAuthorization(plan: TradePlan, chainId: bigint): Eip1193Request {
+  const field = (name: string, type: string) => ({ name, type });
+  return typedDataRequest(plan.wallet, {
+    domain: { name: "KairosTradePlan", version: "1", chainId: Number(chainId) },
+    primaryType: "TradePlan",
+    types: {
+      EIP712Domain: [field("name", "string"), field("version", "string"), field("chainId", "uint256")],
+      TradePlan: [
+        field("wallet", "address"),
+        field("partnerId", "string"),
+        field("audience", "string"),
+        field("planId", "string"),
+        field("planHash", "bytes32"),
+        field("executeBefore", "uint256"),
+        field("tradeSubmitBefore", "uint256"),
+      ],
+    },
+    message: {
+      wallet: plan.wallet,
+      partnerId: plan.partnerId,
+      audience: plan.audience,
+      planId: plan.id,
+      planHash: plan.planHash,
+      executeBefore: unixSeconds(plan.executeBefore),
+      tradeSubmitBefore: unixSeconds(plan.tradeSubmitBefore),
+    },
+  });
+}
+
+const VENUE_CHAINS: Record<Venue, readonly bigint[]> = { polymarket: [137n], predictfun: [56n], hyperliquid: [42161n, 421614n] };
+const POLYMARKET_EXCHANGES = [CTF_EXCHANGE_V2_LOWER, NEG_RISK_CTF_EXCHANGE_V2_LOWER, CTF_EXCHANGE_V1_LOWER, NEG_RISK_CTF_EXCHANGE_V1_LOWER];
+const SHARE_DECIMALS: Partial<Record<Venue, number>> = { polymarket: 6, predictfun: 18 };
+// Relay's approval proxy, the only contract a funding permit may pay.
+const RELAY_APPROVAL_PROXY = "0x5567954cd026cebfe486062cb75848e0f1c12e58";
+
+/** `value` (a canonical decimal) in base units, rounded up. */
+function units(value: string, decimals: number): bigint {
+  const [whole, frac = ""] = value.split(".");
+  const scaled = BigInt(whole + (frac + "0".repeat(decimals)).slice(0, decimals));
+  return frac.length > decimals && /[1-9]/.test(frac.slice(decimals)) ? scaled + 1n : scaled;
+}
+
 /** Refuse a prepared plan that is not what was asked for. Throws before anything is signed. */
 function checkPrepared(plan: TradePlan, body: PrepareBody, opts: RunTradePlanOptions): void {
   const refuse = (why: string): never => {
@@ -429,6 +514,8 @@ function checkPrepared(plan: TradePlan, body: PrepareBody, opts: RunTradePlanOpt
 
   const want = body.order;
   const got = plan.order;
+  const venue = want.market.includes(":") ? want.market.split(":")[0].toLowerCase() : "polymarket";
+  if (plan.venue !== venue) refuse(`venue changed to ${plan.venue}`);
   if (!same(got.market, want.market)) refuse(`market changed to ${got.market}`);
   if (got.side !== "buy") refuse(`side changed to ${got.side}`);
   if (got.price !== want.price) refuse(`price changed to ${got.price}`);
@@ -443,12 +530,14 @@ function checkPrepared(plan: TradePlan, body: PrepareBody, opts: RunTradePlanOpt
     if (!got.expiresAt || Date.parse(got.expiresAt) > Date.parse(want.expiresAt)) refuse("expiresAt is later than requested");
   } else if (got.expiresAt && !sessionBound) refuse("an expiry was added");
   if (Date.parse(plan.tradeSubmitBefore) > Date.parse(body.tradeSubmitBefore)) refuse("tradeSubmitBefore is later than requested");
+  if (!(Date.parse(plan.executeBefore) <= Date.parse(plan.tradeSubmitBefore))) refuse("executeBefore is after tradeSubmitBefore");
 
   const b = plan.tradeBudget;
   const notional = BigInt(b.notionalRaw);
   const fee = BigInt(b.maxCollateralFeeRaw);
   const debit = BigInt(b.maxDebitRaw);
   if (notional <= 0n || notional + fee > debit || b.maxPlatformFeeBps < 0 || b.maxPlatformFeeBps > 1000) refuse("its budget is inconsistent");
+  if (notional > units(String(mulDecimal(got.price, got.size)), b.decimals)) refuse("its notional exceeds price times size");
   if (opts.maxDebitRaw !== undefined && debit > BigInt(opts.maxDebitRaw)) refuse(`it could debit ${b.maxDebitRaw}, over maxDebitRaw ${String(opts.maxDebitRaw)}`);
 
   const pf = plan.funding;
@@ -463,26 +552,127 @@ function checkPrepared(plan: TradePlan, body: PrepareBody, opts: RunTradePlanOpt
   const deps = (plan.ctfDependencies ?? []).map((d) => d.intent.intentId);
   if (JSON.stringify(deps) !== JSON.stringify(body.ctfDependencies ?? [])) refuse("its on-chain prerequisites differ");
 
+  // Every request is bound into planHash and the plan authorization; recompute both rather than trust them.
   for (const req of plan.requests) {
-    if (!same(req.signer, body.wallet) || !same(String(req.request.params[0] ?? ""), body.wallet)) refuse(`request ${req.id} is for another signer`);
+    const signer = req.request.method === "personal_sign" ? req.request.params[1] : req.request.params[0];
+    if (!same(req.signer, body.wallet) || !same(String(signer ?? ""), body.wallet)) refuse(`request ${req.id} is for another signer`);
     if (req.externalSubmission) refuse(`request ${req.id} is client-submitted`);
-    if (req.request.method !== "eth_signTypedData_v4" && req.request.method !== "personal_sign") refuse(`request ${req.id} asks for ${req.request.method}`);
+    if (req.request.method !== "eth_signTypedData_v4") refuse(`request ${req.id} asks for ${req.request.method}`);
+    let hash: string | undefined;
+    try {
+      hash = requestHash(req.request);
+    } catch {
+      refuse(`request ${req.id} is malformed`);
+    }
+    if (hash !== req.requestHash) refuse(`request ${req.id} does not match its requestHash`);
+    const doc = typedDoc(req.request);
+    if (!doc || uintValue(doc.domain?.chainId) === undefined || uintValue(doc.domain?.chainId) !== uintValue(req.chainId)) refuse(`request ${req.id} signs for another chain`);
   }
-  const consent = plan.requests.find((r) => r.purpose === "plan");
-  if (!consent) refuse("it has no plan authorization");
-  const message = typedMessage(consent!.request);
-  if (!message || !same(String(message.wallet), body.wallet) || message.planId !== plan.id || !same(String(message.planHash), plan.planHash)) {
-    refuse("its authorization does not name this plan");
+  if (tradePlanHash(plan) !== plan.planHash) refuse("its planHash does not match the plan");
+  const consents = plan.requests.filter((r) => r.purpose === "plan");
+  const trades = plan.requests.filter((r) => r.purpose === "trade");
+  if (consents.length !== 1 || trades.length !== 1) refuse("it needs exactly one plan authorization and one trade");
+  const tradeChain = uintValue(trades[0].chainId);
+  if (tradeChain === undefined || !VENUE_CHAINS[plan.venue]?.includes(tradeChain)) refuse("the trade signs on another chain");
+  if (uintValue(consents[0].chainId) !== tradeChain) refuse("the plan authorization signs on another chain");
+  if (!sameRequest(consents[0].request, tradePlanAuthorization(plan, tradeChain!))) refuse("its authorization does not name this plan");
+  checkTrade(plan, typedDoc(trades[0].request)!, refuse);
+  for (const req of plan.requests.filter((r) => r.purpose === "funding")) {
+    if (!pf) refuse("it asks for a funding signature without funding");
+    checkFunding(plan, req, refuse);
   }
 }
 
-function typedMessage(request: Eip1193Request): Record<string, unknown> | undefined {
-  try {
-    const doc = typeof request.params[1] === "string" ? JSON.parse(request.params[1]) : request.params[1];
-    return doc?.message;
-  } catch {
-    return undefined;
+/** The venue order the trade request signs must be this plan's buy. */
+function checkTrade(plan: TradePlan, doc: TypedDoc, refuse: (why: string) => never): void {
+  const o = plan.order;
+  const m = doc.message ?? {};
+  if (plan.venue === "hyperliquid") {
+    const ok =
+      doc.primaryType === "PlaceOrder" &&
+      doc.domain?.name === "Kairos" &&
+      sameHex(m.wallet, plan.wallet) &&
+      typeof m.market === "string" &&
+      m.market.toLowerCase() === o.market.toLowerCase() &&
+      m.outcome === o.outcome &&
+      m.side === "buy" &&
+      m.price === o.price &&
+      m.size === o.size &&
+      m.timeInForce === o.timeInForce &&
+      m.postOnly === o.postOnly &&
+      m.action === plan.id &&
+      uintValue(m.expiresAt) === BigInt(unixSeconds(plan.tradeSubmitBefore));
+    if (!ok) refuse("the trade signs a different order");
+    return;
   }
+  const order = (plan.venue === "polymarket" ? m.contents : m) as Record<string, unknown> | undefined;
+  const makers = plan.venue === "polymarket" ? [plan.tradingWallet] : [plan.wallet, plan.tradingWallet];
+  const wrapped =
+    plan.venue !== "polymarket" ||
+    (doc.primaryType === "TypedDataSign" && m.name === "DepositWallet" && uintValue(m.chainId) === 137n && sameHex(m.verifyingContract, plan.tradingWallet) && POLYMARKET_EXCHANGES.includes(String(doc.domain?.verifyingContract).toLowerCase()));
+  const ok =
+    wrapped &&
+    (plan.venue === "polymarket" || doc.primaryType === "Order") &&
+    !!order &&
+    makers.some((a) => sameHex(order.maker, a)) &&
+    [plan.wallet, plan.tradingWallet].some((a) => sameHex(order.signer, a)) &&
+    uintValue(order.side) === 0n &&
+    uintValue(order.takerAmount) === units(o.size, SHARE_DECIMALS[plan.venue]!) &&
+    uintValue(order.makerAmount) === BigInt(plan.tradeBudget.notionalRaw) &&
+    (order.taker === undefined || uintValue(order.taker) === 0n) &&
+    (!o.expiresAt || order.expiration === undefined || uintValue(order.expiration) === BigInt(unixSeconds(o.expiresAt)));
+  if (!ok) refuse("the trade signs a different order");
+}
+
+/** A funding signature may move only the quoted amount of the source token, from the wallet, to the bridge. */
+function checkFunding(plan: TradePlan, req: TradePlanWalletRequest, refuse: (why: string) => never): void {
+  const f = plan.funding!;
+  const doc = typedDoc(req.request)!;
+  const m = doc.message ?? {};
+  const chain = BigInt(f.sourceChainId);
+  const amount = BigInt(f.amountInRaw);
+  const until = BigInt(unixSeconds(plan.tradeSubmitBefore));
+  const before = (v: unknown) => {
+    const t = uintValue(v);
+    return t !== undefined && t <= until;
+  };
+  if (uintValue(req.chainId) !== chain || uintValue(doc.domain?.chainId) !== chain) refuse(`funding request ${req.id} signs on another chain`);
+  if (doc.primaryType === "ReceiveWithAuthorization") {
+    const ok =
+      sameHex(doc.domain?.verifyingContract, f.sourceToken) &&
+      sameHex(m.from, plan.wallet) &&
+      sameHex(m.to, RELAY_APPROVAL_PROXY) &&
+      uintValue(m.value) === amount &&
+      before(m.validBefore);
+    if (!ok) refuse(`funding request ${req.id} moves something else`);
+    return;
+  }
+  if (doc.primaryType === "MulticallAuthorization") {
+    const funding = Array.isArray(m.funding) && m.funding.length === 1 ? (m.funding[0] as Record<string, unknown>) : undefined;
+    const ok =
+      sameHex(doc.domain?.verifyingContract, RELAY_APPROVAL_PROXY) &&
+      sameHex(m.from, plan.wallet) &&
+      sameHex(m.refundTo, plan.wallet) &&
+      uintValue(m.msgValue) === 0n &&
+      !!funding &&
+      sameHex(funding.token, f.sourceToken) &&
+      sameHex(funding.from, plan.wallet) &&
+      uintValue(funding.value) === amount &&
+      before(funding.validBefore);
+    if (!ok) refuse(`funding request ${req.id} moves something else`);
+    return;
+  }
+  refuse(`funding request ${req.id} signs an unknown ${String(doc.primaryType)}`);
+}
+
+/** Exact product of two canonical decimals, as a decimal string. */
+function mulDecimal(a: string, b: string): string {
+  const scale = (s: string) => (s.split(".")[1] ?? "").length;
+  const digits = (BigInt(a.replace(".", "")) * BigInt(b.replace(".", ""))).toString();
+  const n = scale(a) + scale(b);
+  if (n === 0) return digits;
+  const padded = digits.padStart(n + 1, "0");
+  return `${padded.slice(0, -n)}.${padded.slice(-n)}`;
 }
 
 function planPath(id: string): string {

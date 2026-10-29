@@ -144,7 +144,7 @@ const plan = await kairos.wallet.tradePlans.run(
 // plan.status: 'completed' (the venue accepted the order), or a failure such as 'funded_trade_failed'
 ```
 
-Before anything is signed, `run` checks the plan against your request. It throws `SafetyCheckError` if the wallet, market, side, price, size, deadlines, funding or budget differ. It accepts only two changes: the outcome's canonical name, and Predict.fun turning GTC into a GTD that ends with the venue session. Prices and sizes must be canonical decimal strings (`'0.5'`, not `'0.50'`). `run` fills in `clientOrderId`, the `Idempotency-Key` and a `tradeSubmitBefore` 4 minutes out. Pass your own `idempotencyKey` to resume the same plan after a crash. `prepare`, `answer`, `execute`, `report`, `get` and `wait` let you run the steps yourself, including client-submitted funding, which `run` refuses.
+Before anything is signed, `run` checks the plan against your request. It throws `SafetyCheckError` if the wallet, market, side, price, size, deadlines, funding or budget differ, or if what the wallet would sign does not match the plan: it recomputes `planHash` and every `requestHash`, rebuilds the plan authorization, and checks the venue order and the funding permits amount by amount. It accepts only two changes: the outcome's canonical name, and Predict.fun turning GTC into a GTD that ends with the venue session. Prices and sizes must be canonical decimal strings (`'0.5'`, not `'0.50'`). `run` fills in `clientOrderId`, the `Idempotency-Key` and a `tradeSubmitBefore` 4 minutes out. Pass your own `idempotencyKey` to resume the same plan after a crash. `prepare`, `answer`, `execute`, `report`, `get` and `wait` let you run the steps yourself, including client-submitted funding, which `run` refuses.
 
 ## On-chain intents
 
@@ -158,7 +158,7 @@ await kairos.wallet.onchain.merge(wallet, 'polymarket:0x…', '1000000')
 await kairos.wallet.onchain.redeem(wallet, 'polymarket:0x…', '1000000', { outcome: 0 }) // a resolved market
 ```
 
-Amounts are in base units (6 decimals). The SDK finds the deposit wallet from `status` and sends lowercase addresses. It throws `SafetyCheckError` before signing if the intent does not debit what you asked. Never broadcast the batch from the wallet yourself: the wallet would pay gas and Kairos would never confirm the intent.
+Amounts are in base units (6 decimals). The SDK finds the deposit wallet from `status` and sends lowercase addresses. It throws `SafetyCheckError` before signing if the intent does not debit what you asked, if `intentHash` or either signing request does not match the terms, or if the batch is anything but the approval and the operation you asked for. Never broadcast the batch from the wallet yourself: the wallet would pay gas and Kairos would never confirm the intent.
 
 Fees, trade plans and on-chain intents need proof of who is calling. With a partner id, that is the wallet's sign-in token: the SDK signs in on first use, as it does for `orders`. With an API key, it is the key itself, and the key's account must own the wallet.
 
