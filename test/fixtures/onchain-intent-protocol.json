@@ -1,0 +1,73 @@
+{
+  "consentRequest": {
+    "method": "eth_signTypedData_v4",
+    "params": [
+      "0x4a62316623ad457f02cdc5d997ded67a383ec569",
+      "{\"domain\":{\"chainId\":\"137\",\"name\":\"KairosOnchainIntent\",\"version\":\"1\"},\"message\":{\"audience\":\"https://api.test\",\"executeBefore\":\"1793233231\",\"intentHash\":\"0x8a2f5e138d86cb98b6eda5b4c1c5170a95444cccefc2246d3899a10034d85f82\",\"intentId\":\"04060cbe-e21b-43ab-b252-8977f7eaca69\",\"partnerId\":\"acme\",\"signer\":\"0x4a62316623ad457f02cdc5d997ded67a383ec569\"},\"primaryType\":\"OnchainIntent\",\"types\":{\"EIP712Domain\":[{\"name\":\"name\",\"type\":\"string\"},{\"name\":\"version\",\"type\":\"string\"},{\"name\":\"chainId\",\"type\":\"uint256\"}],\"OnchainIntent\":[{\"name\":\"signer\",\"type\":\"address\"},{\"name\":\"partnerId\",\"type\":\"string\"},{\"name\":\"audience\",\"type\":\"string\"},{\"name\":\"intentId\",\"type\":\"string\"},{\"name\":\"intentHash\",\"type\":\"bytes32\"},{\"name\":\"executeBefore\",\"type\":\"uint256\"}]}}"
+    ]
+  },
+  "intent": {
+    "committed": false,
+    "dispatchClaimed": false,
+    "intentHash": "0x8a2f5e138d86cb98b6eda5b4c1c5170a95444cccefc2246d3899a10034d85f82",
+    "proof": null,
+    "status": "needs_signatures",
+    "terms": {
+      "account": "0x0202020202020202020202020202020202020202",
+      "audience": "https://api.test",
+      "batch": {
+        "calls": [
+          {
+            "data": "0x12345678",
+            "target": "0x0404040404040404040404040404040404040404",
+            "value": "0"
+          }
+        ],
+        "deadline": "2026-10-29T00:21:31Z",
+        "factory": "0x0303030303030303030303030303030303030303",
+        "nonce": "7"
+      },
+      "chainId": "137",
+      "contractVersion": 1,
+      "createdAt": "2026-10-29T00:19:31Z",
+      "dependencies": [],
+      "effects": [
+        {
+          "amountRaw": "3",
+          "direction": "debit",
+          "token": {
+            "contract": "0x0505050505050505050505050505050505050505",
+            "kind": "erc20"
+          }
+        },
+        {
+          "amountRaw": "3",
+          "direction": "credit",
+          "token": {
+            "contract": "0x0606060606060606060606060606060606060606",
+            "kind": "erc1155",
+            "tokenId": "42"
+          }
+        }
+      ],
+      "executeBefore": "2026-10-29T00:20:31Z",
+      "executionRegion": "local",
+      "id": "04060cbe-e21b-43ab-b252-8977f7eaca69",
+      "market": "polymarket:condition",
+      "maxWalletGasCostRaw": "0",
+      "operation": "split",
+      "partnerId": "acme",
+      "signer": "0x4a62316623ad457f02cdc5d997ded67a383ec569",
+      "submissionEndpoint": "https://relayer.test/submit",
+      "submissionOwner": "client"
+    },
+    "transactionHash": null
+  },
+  "nativeRequest": {
+    "method": "eth_signTypedData_v4",
+    "params": [
+      "0x4a62316623ad457f02cdc5d997ded67a383ec569",
+      "{\"domain\":{\"chainId\":\"137\",\"name\":\"DepositWallet\",\"verifyingContract\":\"0x0202020202020202020202020202020202020202\",\"version\":\"1\"},\"message\":{\"calls\":[{\"data\":\"0x12345678\",\"target\":\"0x0404040404040404040404040404040404040404\",\"value\":\"0\"}],\"deadline\":\"1793233291\",\"nonce\":\"7\",\"wallet\":\"0x0202020202020202020202020202020202020202\"},\"primaryType\":\"Batch\",\"types\":{\"Batch\":[{\"name\":\"wallet\",\"type\":\"address\"},{\"name\":\"nonce\",\"type\":\"uint256\"},{\"name\":\"deadline\",\"type\":\"uint256\"},{\"name\":\"calls\",\"type\":\"Call[]\"}],\"Call\":[{\"name\":\"target\",\"type\":\"address\"},{\"name\":\"value\",\"type\":\"uint256\"},{\"name\":\"data\",\"type\":\"bytes\"}],\"EIP712Domain\":[{\"name\":\"name\",\"type\":\"string\"},{\"name\":\"version\",\"type\":\"string\"},{\"name\":\"chainId\",\"type\":\"uint256\"},{\"name\":\"verifyingContract\",\"type\":\"address\"}]}}"
+    ]
+  }
+}
