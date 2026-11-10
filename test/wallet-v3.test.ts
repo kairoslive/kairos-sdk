@@ -302,3 +302,77 @@ test("abort: a call queued behind another wallet prompt never prompts once abort
   await new Promise((r) => setTimeout(r, 20));
   assert.deepEqual(prompts, ["first"]);
 });
+
+test("routedOrder: sends one routedOrder action, signs each leg on its venue's chain under one action id, returns every leg", async () => {
+  const planLeg = (venue: string, market: string) => ({ venue, market, outcome: "Yes", price: "0.3", size: "25", timeInForce: "FAK", clientOrderId: null });
+  const route = { linkId: "l1", linkTitle: "T", requested: "50", planned: "50", unfilled: "0", blendedEffective: "0.31", stop: "filled", legs: [planLeg("predictfun", "predictfun:1"), planLeg("polymarket", "polymarket:0xabc")], notes: [] };
+  const request = (n: number) => ({ method: "eth_signTypedData_v4", params: [WALLET, `{"leg":${n}}`] });
+  const leg = (index: number, venue: string, chainId: string) =>
+    step({ id: "r1", type: "routed_order", status: "needs_signature", request: request(index), venue, chainId, route, leg: { index, of: 2 } });
+  const result = { ...route, routed: true, placed: 2, unknown: 0, failed: 0, legs: [{ ...route.legs[0], status: "placed", orderId: "o1" }, { ...route.legs[1], status: "placed", orderId: "o2" }] };
+  let answers = 0;
+  const { impl, calls } = fakeFetch([
+    (c) => (c.method === "POST" && c.path === "/v3/actions" ? [200, leg(1, "predictfun", "0x38")] : undefined),
+    (c) => (c.method === "POST" && c.path === "/v3/actions/r1" ? [200, ++answers === 1 ? step({ id: "r1", type: "routed_order", route, leg: { index: 1, of: 2 } }) : step({ id: "r1", type: "routed_order", status: "done", result })] : undefined),
+    (c) => (c.method === "GET" && c.path === "/v3/actions/r1" ? [200, leg(2, "polymarket", "0x89")] : undefined),
+  ]);
+  const wallet = fakeWallet();
+  const seen: unknown[] = [];
+  const client = new WalletClient({ baseUrl: "https://exec.test", partnerId: "acme", provider: wallet.provider, fetch: impl, pollIntervalMs: 1, onStep: (s) => seen.push(s.leg) });
+  const out = await client.routedOrder(WALLET, { market: "polymarket:0xabc", outcome: "Yes", size: 50, maxPrice: 0.35, clientOrderId: "acme-route-41" });
+  assert.deepEqual(calls[0].body, { wallet: WALLET, action: { type: "routedOrder", market: "polymarket:0xabc", outcome: "Yes", size: "50", maxPrice: "0.35", clientOrderId: "acme-route-41" } });
+  assert.equal(calls[0].headers["x-kairos-wallet-api"], "2");
+  assert.deepEqual(calls.map((c) => `${c.method} ${c.path}`), ["POST /v3/actions", "POST /v3/actions/r1", "GET /v3/actions/r1", "POST /v3/actions/r1"]);
+  assert.deepEqual(seen, [{ index: 1, of: 2 }, { index: 2, of: 2 }]);
+  assert.deepEqual(out.legs.map((l) => l.status), ["placed", "placed"]);
+  const switches = wallet.requests.filter((r) => r.method === "wallet_switchEthereumChain").map((r) => (r.params?.[0] as { chainId: string }).chainId);
+  assert.deepEqual(switches, ["0x38", "0x89"]);
+  assert.equal(wallet.methods().filter((m) => m === "eth_signTypedData_v4").length, 2);
+});
+
+test("routedOrder: busy on a leg's answer, then the next leg is open: the wallet signs the new leg, the old answer is not re-sent", async () => {
+  const request = (n: number) => ({ method: "eth_signTypedData_v4", params: [WALLET, `{"leg":${n}}`] });
+  const leg = (index: number) => step({ id: "r1", type: "routed_order", status: "needs_signature", request: request(index), leg: { index, of: 2 } });
+  let answers = 0;
+  const { impl, calls } = fakeFetch([
+    (c) => (c.method === "POST" && c.path === "/v3/actions" ? [200, leg(1)] : undefined),
+    (c) => (c.method === "POST" ? (++answers === 1 ? [409, { error: "this action is busy; GET it and retry" }] : [200, step({ id: "r1", type: "routed_order", status: "done", result: { routed: true, legs: [] } })]) : undefined),
+    (c) => (c.method === "GET" ? [200, leg(2)] : undefined),
+  ]);
+  const wallet = fakeWallet({ eth_signTypedData_v4: (p) => (String(p[1]).includes('"leg":1') ? "0x" + "01".repeat(65) : "0x" + "02".repeat(65)) });
+  const client = new WalletClient({ baseUrl: "https://exec.test", partnerId: "acme", provider: wallet.provider, fetch: impl, pollIntervalMs: 1 });
+  await client.routedOrder(WALLET, { market: "m", outcome: "Yes", size: "1" });
+  const sent = calls.filter((c) => c.method === "POST" && c.path === "/v3/actions/r1").map((c) => (c.body as { signature: string }).signature);
+  assert.deepEqual(sent, ["0x" + "01".repeat(65), "0x" + "02".repeat(65)]);
+});
+
+test("routedOrder: no leg placed is an ActionFailedError that keeps every leg; a maybe-live leg makes it outcome-unknown", async () => {
+  const result = { routed: true, placed: 0, unknown: 1, failed: 1, legs: [{ venue: "predictfun", status: "unknown", errorCode: "ORDER_OUTCOME_UNKNOWN" }, { venue: "polymarket", status: "failed", errorCode: "NO_MATCH" }] };
+  const { impl } = fakeFetch([() => [200, step({ type: "routed_order", status: "failed", error: "predictfun: unknown; polymarket: no match", errorCode: "ORDER_OUTCOME_UNKNOWN", result })]]);
+  const client = new WalletClient({ baseUrl: "https://exec.test", partnerId: "acme", provider: fakeWallet().provider, fetch: impl });
+  await assert.rejects(client.routedOrder(WALLET, { market: "m", outcome: "Yes", size: "1" }), (e: unknown) =>
+    e instanceof ActionFailedError && e.outcomeUnknown && (e.step.result as typeof result).legs.length === 2);
+});
+
+test("routedOrder: a reused clientOrderId whose action expired is a 409, not retried as busy", async () => {
+  const { impl, calls } = fakeFetch([() => [409, { error: "this clientOrderId already ran a routed order; read the wallet's orders, or use a new id" }]]);
+  const client = new WalletClient({ baseUrl: "https://exec.test", partnerId: "acme", provider: fakeWallet().provider, fetch: impl, pollIntervalMs: 1 });
+  await assert.rejects(client.routedOrder(WALLET, { market: "m", outcome: "Yes", size: "1", clientOrderId: "x" }), (e: unknown) => e instanceof KairosError && e.status === 409);
+  assert.equal(calls.length, 1);
+});
+
+test("routedOrder: maxPrice is left out when not given", async () => {
+  const { impl, calls } = fakeFetch([() => [200, step({ type: "routed_order", status: "done", result: { routed: true, legs: [] } })]]);
+  const client = new WalletClient({ baseUrl: "https://exec.test", partnerId: "acme", provider: fakeWallet().provider, fetch: impl });
+  await client.routedOrder(WALLET, { market: "predictfun:1", outcome: "No", size: "5", timeInForce: "IOC" });
+  assert.deepEqual(calls[0].body, { wallet: WALLET, action: { type: "routedOrder", market: "predictfun:1", outcome: "No", size: "5", timeInForce: "IOC" } });
+});
+
+test("routedOrder: a refusal before signing is a KairosError with its code; a timeout is outcome-unknown", async () => {
+  const refused = fakeFetch([() => [422, { error: "nothing on this market can be routed for this wallet right now", errorCode: "ROUTE_UNAVAILABLE", route: { notes: [] } }]]);
+  const a = new WalletClient({ baseUrl: "https://exec.test", partnerId: "acme", provider: fakeWallet().provider, fetch: refused.impl });
+  await assert.rejects(a.routedOrder(WALLET, { market: "m", outcome: "Yes", size: "1" }), (e: unknown) => e instanceof KairosError && e.status === 422 && e.code === "ROUTE_UNAVAILABLE");
+  const working = fakeFetch([() => [200, step({ type: "routed_order" })]]);
+  const b = new WalletClient({ baseUrl: "https://exec.test", partnerId: "acme", provider: fakeWallet().provider, fetch: working.impl, pollIntervalMs: 1, timeoutMs: 20 });
+  await assert.rejects(b.routedOrder(WALLET, { market: "m", outcome: "Yes", size: "1" }), (e: unknown) => e instanceof ActionFailedError && e.outcomeUnknown && e.errorCode === "ORDER_OUTCOME_UNKNOWN");
+});

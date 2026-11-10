@@ -33,12 +33,34 @@ export interface OrderInput {
   expiresAt?: number;
 }
 
+/** Preview: a buy split across every venue the market is linked on, cheapest first. */
+export interface RoutedOrderInput {
+  /** Any linked venue's market: an object from `markets.list`, or `venue:market_id`. */
+  market: MarketRef;
+  /** `"Yes"` or `"No"`, or any linked venue's own name for that side. */
+  outcome: string;
+  /** Shares to receive in total, across all venues. */
+  size: string | number;
+  /** Highest price per share any planned share may cost, venue fees included (0–1). */
+  maxPrice?: string | number;
+  /** Plan only book levels within this many cents (fees included) of the best price. 1–99. */
+  slippageCents?: number;
+  /** For every venue order. Default `FAK`. */
+  timeInForce?: "FAK" | "IOC";
+  /** Your id for the whole routed order, up to 100 ASCII characters. Reusing it returns the same action, or `409` once that action has expired. */
+  clientOrderId?: string;
+}
+
 export type Action =
   | { type: "login" }
   | { type: "setup"; venues?: Venue[] }
   | ({ type: "order" } & Omit<OrderInput, "price" | "size" | "market"> & { market: string; price: string; size: string })
   | { type: "cancel"; orderIds: string[] }
-  | { type: "cancel"; all: true };
+  | { type: "cancel"; all: true }
+  | ({ type: "routedOrder" } & Omit<RoutedOrderInput, "market" | "size" | "maxPrice"> & { market: string; size: string; maxPrice?: string });
+
+/** A step's `type`: the action's type, except a routed order's steps, which are `routed_order`. */
+export type StepType = Exclude<Action["type"], "routedOrder"> | "routed_order";
 
 export type StepStatus = "needs_signature" | "working" | "done" | "failed";
 
@@ -52,11 +74,12 @@ export type ActionErrorCode =
   | "CLIENT_ORDER_ID_CONFLICT"
   | "HYPERLIQUID_AGENT_MISSING"
   | "POLYMARKET_V2_TRADING_DISABLED"
+  | "ROUTE_UNAVAILABLE"
   | (string & {});
 
 export interface Step<R = unknown> {
   id: string;
-  type: Action["type"];
+  type: StepType;
   status: StepStatus;
   /** What the wallet runs next: a signature, or (approvals) transactions it sends itself. */
   request: Eip1193Request | null;
@@ -69,12 +92,77 @@ export interface Step<R = unknown> {
   fallbackRequests?: Eip1193Request[];
   /** Unix ms: the last moment the server accepts the answer to `request`. */
   expiresAtMs?: number;
-  /** Unix ms: an order is waiting on the venue until then; `result` holds its provisional state. */
+  /** Unix ms: an order is waiting on the venue until then; `result` holds its provisional state (on a routed order, the current leg's `OrderResult`). */
   holdUntilMs?: number;
   result: R | null;
   error: string | null;
   /** Set on some failures. */
   errorCode?: ActionErrorCode;
+  /** Routed order: the whole plan, on every step until it ends (then in `result`). */
+  route?: RoutePlan;
+  /** Routed order: which venue order this step signs, 1-based. */
+  leg?: { index: number; of: number };
+}
+
+/** One venue order in a routed order's plan. Prices and sizes are decimal strings. */
+export interface RoutePlanLeg {
+  venue: Venue;
+  /** `venue:market_id`. */
+  market: string;
+  /** That venue's name for the side. */
+  outcome: string;
+  /** The worst book price planned on this venue; the order is placed at it. */
+  price: string;
+  size: string;
+  /** Shares received after a venue that takes its fee in shares (Predict.fun). */
+  delivered?: string;
+  estCost?: string;
+  estFee?: string;
+  /** `price` with venue fees included. */
+  effectiveLimit?: string;
+  timeInForce: "FAK" | "IOC" | (string & {});
+  /** This leg's own id, derived from yours. */
+  clientOrderId: string | null;
+}
+
+/** A routed order's plan, fixed when the action starts. */
+export interface RoutePlan {
+  linkId: string;
+  linkTitle: string;
+  requested: string;
+  planned: string;
+  unfilled: string;
+  /** Planned cost per share received, venue fees included. */
+  blendedEffective: string | null;
+  /** Why planning ended. */
+  stop: "filled" | "exhausted" | "effective_cap" | "below_minimum" | (string & {});
+  legs: RoutePlanLeg[];
+  /** Why any venue was left out. */
+  notes: string[];
+}
+
+/** One venue's outcome in a routed order. */
+export interface RoutedLegResult extends Omit<RoutePlanLeg, "delivered" | "estCost" | "estFee" | "effectiveLimit"> {
+  /** `placed`: the venue took the order. `unknown`: it may be live, check orders first. `skipped`: never sent. */
+  status: "placed" | "failed" | "unknown" | "skipped";
+  orderId?: string | null;
+  orderStatus?: OrderResult["status"] | null;
+  venueOrderId?: string | null;
+  /** The venue order's result, when placed. */
+  order?: OrderResult;
+  error?: string;
+  errorCode?: ActionErrorCode;
+  stepId?: string;
+}
+
+/** What a routed order returns: the plan, plus each leg's outcome in `legs`. */
+export interface RoutedOrderResult extends Omit<RoutePlan, "legs"> {
+  routed: true;
+  placed: number;
+  unknown: number;
+  /** Legs not placed and not unknown, skipped ones included. */
+  failed: number;
+  legs: RoutedLegResult[];
 }
 
 export type NextStep = "setup" | "wait" | "fund" | "blocked" | null;
@@ -440,6 +528,17 @@ export class WalletClient {
     return this.run<OrderResult>(wallet, { type: "order", market: marketRef(market), ...rest, price: String(price), size: String(size) }, opts);
   }
 
+  /**
+   * Preview: buy at the best all-in price across every venue the market is linked on. The wallet signs one order per
+   * venue, cheapest first. Done when at least one leg was placed; check each leg's `status` in the result. When none was
+   * placed it throws `ActionFailedError`, whose `step.result` still lists every leg.
+   */
+  routedOrder(wallet: string, order: RoutedOrderInput, opts: CallOptions = {}): Promise<RoutedOrderResult> {
+    const { market, size, maxPrice, ...rest } = order;
+    const limit = maxPrice === undefined ? {} : { maxPrice: String(maxPrice) };
+    return this.run<RoutedOrderResult>(wallet, { type: "routedOrder", market: marketRef(market), ...rest, size: String(size), ...limit }, opts);
+  }
+
   /** Cancel orders by Kairos `orderId` (up to 100), on any venue. One signature. */
   cancel(wallet: string, orderIds: string[], opts: CallOptions = {}): Promise<CancelResult> {
     return this.run<CancelResult>(wallet, { type: "cancel", orderIds }, opts);
@@ -593,7 +692,7 @@ function isBusy(e: unknown): boolean {
 
 // A working order or cancel may still land after the client stops waiting.
 function timeoutCode(step: Step): ActionErrorCode | undefined {
-  if (step.type === "order") return "ORDER_OUTCOME_UNKNOWN";
+  if (step.type === "order" || step.type === "routed_order") return "ORDER_OUTCOME_UNKNOWN";
   if (step.type === "cancel") return "CANCEL_OUTCOME_UNKNOWN";
   return step.errorCode;
 }

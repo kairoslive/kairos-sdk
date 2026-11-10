@@ -99,6 +99,23 @@ Get your partner id and base URL from Kairos.
 
 `orders` and `positions` return the rows from every venue Kairos could read. `ordersPage` and `positionsPage` also return `venueDetail`, which names any venue that failed. Every method takes `{ signal }` to abort it, and you can pass `signal` to the client too. A held order is polled again at its `holdUntilMs`.
 
+### Best price across venues
+
+Preview: staging only for now (elsewhere it answers `403`). When a market is linked on several venues, `routedOrder` buys at the best all-in price across them. The wallet signs one ordinary order per venue, cheapest first, switching chains as each venue needs.
+
+```ts
+const result = await kairos.wallet.routedOrder(wallet, {
+  market: 'polymarket:0x…', // any linked venue's market
+  outcome: 'Yes',
+  size: '50', // shares to receive, across all venues
+  maxPrice: '0.35', // optional: highest price per share, venue fees included
+  clientOrderId: 'acme-route-41', // optional: the same id returns the same action (409 once it has expired)
+})
+// result.legs: [{ venue: 'predictfun', status: 'placed', orderId: '…' }, { venue: 'polymarket', status: 'failed', errorCode: 'NO_MATCH' }]
+```
+
+Buys only. Each step carries the whole plan in `step.route` and its place in `step.leg` (`{ index, of }`, 1-based), so `onStep` can show it before each signature. One leg failing doesn't stop the others. If at least one leg is placed it returns the result: check each leg's `status`, and read the wallet's orders before buying again after an `unknown` leg. If none is placed it throws `ActionFailedError`; `e.step.result` still lists every leg, and `e.outcomeUnknown` is true when one may be live. A market that can't be routed throws `KairosError` (`422`; with code `ROUTE_UNAVAILABLE` when no venue can take a leg right now, and the plan's `notes` in `e.body.route`).
+
 ### Server-side: your API key instead of a partner id
 
 ```ts
