@@ -5,6 +5,7 @@
 ### Added
 
 - `apiKey: { clientId, apiKey, apiSecret }` as an alternative to `partnerId` (server-side only). Pass exactly one.
+- `kairos.wallet.routedOrder` (preview, staging only): one buy split across every venue the market is linked on, with `RoutedOrderInput`, `RoutedOrderResult`, `RoutePlan` and `Step.route`/`Step.leg` types. `Action` takes `routedOrder`, and `Step.type` is `StepType` (a routed order's steps are `routed_order`).
 - `kairos.wallet.fees` (preview, staging only): `summary`, `createSettlement`, `getSettlement`, `answerSettlement`, `settle`, `settleAll`, `wait`.
 - `kairos.wallet.tradePlans` (preview, staging only): `prepare`, `get`, `answer`, `execute`, `report`, `wait`, and `run`, which checks the prepared plan against your request before anything is signed.
 - `kairos.wallet.onchain` (preview, staging only): `prepare`, `get`, `execute`, `report`, `wait`, and `split`, `merge`, `redeem`.
