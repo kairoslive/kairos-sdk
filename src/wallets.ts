@@ -51,13 +51,68 @@ export interface RoutedOrderInput {
   clientOrderId?: string;
 }
 
+/** A Polymarket combo (parlay): 2–10 outcome position ids, one per market, that all have to win. */
+export interface ComboInput {
+  /** Polymarket outcome position ids (decimal strings), from a combo-eligible market's `position_ids`. */
+  legs: string[];
+  /** `"sell"` cashes out the whole position. */
+  side: "buy" | "sell";
+  /** Buy: the most pUSD the combo may cost, Polymarket's fee included. Sell: the shares held (`sharesBalance`). */
+  amount: string | number;
+  /** Buys only: highest price per share the signed order may carry (0–1). */
+  maxPrice?: string | number;
+  /** Cash-outs only: least pUSD that may land after Polymarket's and Kairos's fees. */
+  minProceeds?: string | number;
+}
+
+/** A combo quote or fill. Decimal strings: pUSD, or shares. */
+export interface ComboResult {
+  side: "buy" | "sell";
+  /** The combo's condition id (31 bytes). */
+  conditionId: string;
+  /** The combo's YES position id, the token the order trades. */
+  positionId: string;
+  price: string;
+  shares: string;
+  stake?: string;
+  exchangeFee: string;
+  cost?: string;
+  kairosFee: string;
+  totalCost?: string;
+  grossProceeds?: string;
+  proceeds?: string;
+  netProceeds?: string;
+  /** Fills only. */
+  rfqId?: string;
+  status?: string;
+  transactionHash?: string;
+}
+
+/** One of the trading wallet's combos, as Polymarket reports it. */
+export interface WalletCombo {
+  /** `polymarket:0x<64 hex>`: the `market` to redeem it with through `onchain.redeem`. */
+  market?: string;
+  comboConditionId: string;
+  comboPositionId: string;
+  sharesBalance: string;
+  totalCostUsdc: string;
+  status: string;
+  /** True once every leg won and shares are left to redeem. */
+  redeemable: boolean;
+  legsPending: number;
+  legs: { legPositionId: string; title: string; outcome: string; [key: string]: unknown }[];
+  [key: string]: unknown;
+}
+
 export type Action =
   | { type: "login" }
   | { type: "setup"; venues?: Venue[] }
   | ({ type: "order" } & Omit<OrderInput, "price" | "size" | "market"> & { market: string; price: string; size: string })
   | { type: "cancel"; orderIds: string[] }
   | { type: "cancel"; all: true }
-  | ({ type: "routedOrder" } & Omit<RoutedOrderInput, "market" | "size" | "maxPrice"> & { market: string; size: string; maxPrice?: string });
+  | ({ type: "routedOrder" } & Omit<RoutedOrderInput, "market" | "size" | "maxPrice"> & { market: string; size: string; maxPrice?: string })
+  | { type: "comboQuote"; legs: string[]; side: "buy" | "sell"; amount: string }
+  | { type: "combo"; legs: string[]; side: "buy" | "sell"; amount: string; maxPrice?: string; minProceeds?: string };
 
 /** A step's `type`: the action's type, except a routed order's steps, which are `routed_order`. */
 export type StepType = Exclude<Action["type"], "routedOrder"> | "routed_order";
@@ -75,6 +130,9 @@ export type ActionErrorCode =
   | "HYPERLIQUID_AGENT_MISSING"
   | "POLYMARKET_V2_TRADING_DISABLED"
   | "ROUTE_UNAVAILABLE"
+  | "NO_QUOTES"
+  | "SIZE_TOO_LARGE"
+  | "PRICE_LIMIT"
   | (string & {});
 
 export interface Step<R = unknown> {
@@ -537,6 +595,28 @@ export class WalletClient {
     const { market, size, maxPrice, ...rest } = order;
     const limit = maxPrice === undefined ? {} : { maxPrice: String(maxPrice) };
     return this.run<RoutedOrderResult>(wallet, { type: "routedOrder", market: marketRef(market), ...rest, size: String(size), ...limit }, opts);
+  }
+
+  /** Price a Polymarket combo with a live maker quote. Nothing is signed. */
+  comboQuote(wallet: string, combo: Omit<ComboInput, "maxPrice" | "minProceeds">, opts: CallOptions = {}): Promise<ComboResult> {
+    return this.run<ComboResult>(wallet, { type: "comboQuote", legs: combo.legs, side: combo.side, amount: String(combo.amount) }, opts);
+  }
+
+  /**
+   * Buy or cash out a Polymarket combo with one signature. Quotes last about 5 seconds: a later signature gets a fresh
+   * quote under the same limits and a new prompt, up to 3 times, before `SIGNATURE_EXPIRED`.
+   */
+  combo(wallet: string, combo: ComboInput, opts: CallOptions = {}): Promise<ComboResult> {
+    const action: Extract<Action, { type: "combo" }> = { type: "combo", legs: combo.legs, side: combo.side, amount: String(combo.amount) };
+    if (combo.maxPrice !== undefined) action.maxPrice = String(combo.maxPrice);
+    if (combo.minProceeds !== undefined) action.minProceeds = String(combo.minProceeds);
+    return this.run<ComboResult>(wallet, action, opts);
+  }
+
+  /** The trading wallet's Polymarket combos. Logs in first if there is no usable token. */
+  async combos(wallet: string, opts: CallOptions = {}): Promise<WalletCombo[]> {
+    const page = await this.callerRequest<{ tradingWallet: string; combos: WalletCombo[] }>(wallet, "GET", `/v3/wallets/${wallet}/combos`, { signal: opts.signal }, true);
+    return page.combos;
   }
 
   /** Cancel orders by Kairos `orderId` (up to 100), on any venue. One signature. */
