@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `kairos.wallet.comboQuote`, `kairos.wallet.combo` and `kairos.wallet.combos`: quote, buy and cash out Polymarket combos (parlays) with the wallet's own signature, and list the trading wallet's combos. A quote that lapses before the signature is refreshed under the same limits and signed again. Redeem a won combo with `kairos.wallet.onchain.redeem(wallet, combo.market, sharesRaw, { outcome: 0 })`. Adds `ComboInput`, `ComboResult`, `WalletCombo`, the `combo` and `comboQuote` actions, and the error codes `NO_QUOTES`, `SIZE_TOO_LARGE` and `PRICE_LIMIT`.
+
 ## 0.5.0
 
 ### Added

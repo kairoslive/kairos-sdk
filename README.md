@@ -116,6 +116,20 @@ const result = await kairos.wallet.routedOrder(wallet, {
 
 Buys only. Each step carries the whole plan in `step.route` and its place in `step.leg` (`{ index, of }`, 1-based), so `onStep` can show it before each signature. One leg failing doesn't stop the others. If at least one leg is placed it returns the result: check each leg's `status`, and read the wallet's orders before buying again after an `unknown` leg. If none is placed it throws `ActionFailedError`; `e.step.result` still lists every leg, and `e.outcomeUnknown` is true when one may be live. A market that can't be routed throws `KairosError` (`422`; with code `ROUTE_UNAVAILABLE` when no venue can take a leg right now, and the plan's `notes` in `e.body.route`).
 
+### Polymarket combos
+
+A combo (parlay) joins 2–10 Polymarket outcomes; it pays $1 a share only if every leg wins. Kairos gets a maker quote and the wallet signs the order that accepts it.
+
+```ts
+const quote = await kairos.wallet.comboQuote(wallet, { legs: [leg1, leg2], side: 'buy', amount: '10' }) // nothing signed
+const fill = await kairos.wallet.combo(wallet, { legs: [leg1, leg2], side: 'buy', amount: '10', maxPrice: '0.55' })
+const [combo] = await kairos.wallet.combos(wallet)
+await kairos.wallet.combo(wallet, { legs: combo.legs.map((l) => l.legPositionId), side: 'sell', amount: combo.sharesBalance })
+// once combo.redeemable: kairos.wallet.onchain.redeem(wallet, combo.market, sharesRaw, { outcome: 0 })
+```
+
+Quotes last about 5 seconds. A signature that arrives later gets a fresh quote under the same `maxPrice`/`minProceeds` and a new prompt, up to 3 times, then `SIGNATURE_EXPIRED`.
+
 ### Server-side: your API key instead of a partner id
 
 ```ts
