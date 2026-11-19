@@ -29,6 +29,8 @@
     "node": ">=20"
   },
   "scripts": {
+    "generate:openapi": "node scripts/generate-openapi.mjs",
+    "generate:stream": "node scripts/generate-stream-schema.mjs",
     "build": "rm -rf dist && tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "test": "node --experimental-strip-types --no-warnings --test test/*.test.ts",
@@ -47,6 +49,7 @@
   "license": "MIT",
   "devDependencies": {
     "@types/node": "^22.10.0",
+    "openapi-typescript": "7.13.0",
     "typescript": "5.9.3"
   },
   "publishConfig": {

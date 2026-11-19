@@ -376,3 +376,30 @@ test("routedOrder: a refusal before signing is a KairosError with its code; a ti
   const b = new WalletClient({ baseUrl: "https://exec.test", partnerId: "acme", provider: fakeWallet().provider, fetch: working.impl, pollIntervalMs: 1, timeoutMs: 20 });
   await assert.rejects(b.routedOrder(WALLET, { market: "m", outcome: "Yes", size: "1" }), (e: unknown) => e instanceof ActionFailedError && e.outcomeUnknown && e.errorCode === "ORDER_OUTCOME_UNKNOWN");
 });
+
+test("a prepared route can be reviewed without signing and resumed without starting a different action", async () => {
+  const route = { linkId: "match", linkTitle: "Match", requested: "5", planned: "5", unfilled: "0",
+    blendedEffective: "0.4", stop: "filled", legs: [], notes: [] };
+  const first = step({ type: "routed_order", status: "needs_signature", request: signRequest, route });
+  const { impl, calls } = fakeFetch([
+    c => c.path === "/v3/actions" ? [200, first] : undefined,
+    c => c.path === "/v3/actions/a1" ? [200, step({ type: "routed_order", status: "done", result: { legs: [] } })] : undefined,
+  ]);
+  const signer = fakeWallet();
+  const client = new WalletClient({ baseUrl: "https://exec.test", partnerId: "acme", provider: signer.provider, fetch: impl });
+  const prepared = await client.prepareRoutedOrder(WALLET, { market: "polymarket:m", outcome: "Yes", size: "5", maxPrice: "0.4" });
+  assert.deepEqual(signer.methods(), []);
+  await assert.rejects(client.resumeAction(prepared, { approveRoute: async () => false }), /declined/);
+  assert.deepEqual(signer.methods(), []);
+  await client.resumeAction(prepared, { approveRoute: async reviewed => reviewed.linkId === "match" });
+  assert.deepEqual(signer.methods(), ["eth_signTypedData_v4"]);
+  assert.equal(calls.filter(c => c.path === "/v3/actions").length, 1);
+});
+
+test("combo quotes refuse unexpected signing requests without calling the provider", async () => {
+  const { impl } = fakeFetch([() => [200, step({ type: "comboQuote", status: "needs_signature", request: signRequest })]]);
+  const signer = fakeWallet();
+  const client = new WalletClient({ baseUrl: "https://exec.test", partnerId: "acme", provider: signer.provider, fetch: impl });
+  await assert.rejects(client.comboQuote(WALLET, { legs: ["1", "2"], side: "buy", amount: "5" }), /cannot ask for a signature/);
+  assert.deepEqual(signer.methods(), []);
+});

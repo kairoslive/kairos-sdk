@@ -35,8 +35,10 @@ import type { WalletContext } from "./wallets.ts";
 
 export type OnchainOperation = "split" | "merge" | "redeem";
 
-/** `confirmed` is the only final state; `reverted` is reserved: the server does not send it today. */
-export type OnchainIntentStatus = "needs_signatures" | "awaiting_client" | "ready" | "reconciling" | "confirmed" | "reverted";
+export type OnchainIntentStatus = "needs_signatures" | "awaiting_client" | "ready" | "reconciling" | "confirmed" | "failed" | "expired" | "reverted";
+
+const TERMINAL = new Set<OnchainIntentStatus>(["confirmed", "failed", "expired", "reverted"]);
+export const isOnchainIntentFinal = (status: OnchainIntentStatus): boolean => TERMINAL.has(status);
 
 export type OnchainToken = { kind: "erc20"; contract: string } | { kind: "erc1155"; contract: string; tokenId: string };
 
@@ -85,8 +87,9 @@ export interface OnchainIntentView {
     committed: boolean;
     dispatchClaimed: boolean;
     transactionHash: string | null;
+    failure?: { reason: string; failedAt: string; walletNonce?: string; execution?: unknown } | null;
     /** Set once confirmed from a finalized block. */
-    proof: { transactionHash: string; blockHash: string; blockNumber: string; intentHash: string; effects: OnchainEffect[] } | null;
+    proof: { transactionHash: string; blockHash: string; blockNumber: string; intentHash: string; effects: OnchainEffect[]; surplus?: OnchainEffect[]; note?: string } | null;
   };
   /** Kairos consent to the terms. */
   consentRequest: Eip1193Request;
@@ -113,7 +116,7 @@ export interface OnchainIntentInput {
    * gas and Kairos would never confirm the intent.
    */
   submissionOwner?: "kairos" | "client";
-  /** At most 5 minutes out, whole seconds. Default: now + 240 s. */
+  /** Whole seconds. Kairos submission requires 15–60 minutes. The default is 16 minutes (4 for client submission). */
   executeBefore?: Date | number | string;
   /** Intents that must confirm first, e.g. a split before a merge. */
   dependencies?: string[];
@@ -175,14 +178,14 @@ export class OnchainIntentsClient {
     return this.ctx.request<OnchainIntentView>(lowerAddress(wallet, "wallet"), "POST", `${intentPath(id)}/reports`, { body, signal: opts.signal });
   }
 
-  /** Read the intent until it is `confirmed` (or `reverted`). */
+  /** Read a committed intent until it reaches a terminal state. */
   async wait(id: string, wallet: string, opts: OnchainWaitOptions = {}, last?: OnchainIntentView): Promise<OnchainIntentView> {
     const signal = this.ctx.signal(opts);
     const interval = opts.pollIntervalMs ?? this.ctx.pollIntervalMs;
     const deadline = Date.now() + (opts.timeoutMs ?? this.ctx.timeoutMs);
     const read = () => retryTransient(() => this.get(id, wallet, { signal }), deadline, interval, signal);
     let view = last ?? (await read());
-    while (view.intent.status !== "confirmed" && view.intent.status !== "reverted") {
+    while (!isOnchainIntentFinal(view.intent.status)) {
       if (!view.intent.committed) return view;
       if (Date.now() >= deadline) throw new WaitTimeoutError(`on-chain intent ${id} is still ${view.intent.status}`, view);
       await sleep(interval, signal);
@@ -212,7 +215,7 @@ export class OnchainIntentsClient {
     const body = await this.prepareBody(input, { signal });
     let view = await this.prepare(body, { idempotencyKey: opts.idempotencyKey, signal });
     const id = view.intent.terms.id;
-    if (view.intent.committed || view.intent.status === "confirmed") return this.wait(id, body.wallet, opts, view);
+    if (view.intent.committed || isOnchainIntentFinal(view.intent.status)) return this.wait(id, body.wallet, opts, view);
     checkPrepared(view, body);
     const prepared = view;
     const [consentSignature, nativeSignature] = await onChain(
@@ -248,7 +251,7 @@ export class OnchainIntentsClient {
       amountRaw: canonicalRaw(input.amountRaw, "amountRaw", { positive: true }),
       ...(input.outcome !== undefined ? { outcome: input.outcome } : {}),
       submissionOwner: input.submissionOwner ?? "kairos",
-      executeBefore: input.executeBefore !== undefined ? rfc3339(input.executeBefore) : secondsFromNow(240),
+      executeBefore: input.executeBefore !== undefined ? rfc3339(input.executeBefore) : secondsFromNow(input.submissionOwner === "client" ? 240 : 960),
       dependencies: input.dependencies ?? [],
     };
   }
@@ -341,6 +344,15 @@ function checkCalls(calls: OnchainCall[], body: PrepareBody): string | undefined
   const amount = BigInt(body.amountRaw);
   const known = OPERATIONS[body.operation].find((o) => o.target === op.target && o.selector === op.selector);
   if (!known || word(op.data, known.amountWord) !== amount) return "the batch runs another operation";
+  const condition = BigInt(body.market.toLowerCase().replace(/^polymarket:/, ""));
+  const modern = op.target === ROUTER_LOWER;
+  const conditionWord = modern ? 0 : 2;
+  if (word(op.data, conditionWord) !== condition || (modern && (condition & 255n) !== 0n)) return "the batch uses another condition";
+  const validArgs = modern
+    ? op.data.length === 10 + 64 * (known.amountWord + 1)
+    : op.data.length === 10 + 64 * 8 && word(op.data, 0) === BigInt(PUSD_LOWER) && word(op.data, 1) === 0n
+      && word(op.data, 3) === 160n && word(op.data, 5) === 2n && word(op.data, 6) === 1n && word(op.data, 7) === 2n;
+  if (!validArgs) return "the batch changes the collateral, parent, or outcome set";
   if (body.operation === "redeem" && word(op.data, 1) !== BigInt(body.outcome ?? -1)) return "the batch redeems another outcome";
   const operator = word(approval.data, 0);
   if (operator !== BigInt(op.target)) return "the batch approves another operator";
@@ -366,7 +378,9 @@ function checkPrepared(view: OnchainIntentView, body: PrepareBody): void {
   if (t.submissionOwner !== body.submissionOwner) refuse("submission owner changed");
   if (lc(t.market).replace(/^polymarket:/, "") !== lc(body.market).replace(/^polymarket:/, "")) refuse(`market changed to ${t.market}`);
   if (t.maxWalletGasCostRaw !== "0") refuse("the wallet would pay gas");
-  if (Date.parse(t.executeBefore) > Date.parse(body.executeBefore) || Date.parse(t.batch.deadline) > Date.parse(body.executeBefore)) refuse("it runs later than requested");
+  const executeBefore = Date.parse(t.executeBefore);
+  const batchDeadline = Date.parse(t.batch.deadline);
+  if (!(executeBefore > Date.now() && batchDeadline === executeBefore && executeBefore <= Date.parse(body.executeBefore))) refuse("its deadline differs from the requested deadline");
   if (JSON.stringify(t.dependencies.map((d) => d.intentId)) !== JSON.stringify(body.dependencies)) refuse("its prerequisites differ");
   const debits = t.effects.filter((e) => e.direction === "debit");
   if (!debits.length || debits.some((e) => e.amountRaw !== body.amountRaw)) refuse("it debits a different amount");

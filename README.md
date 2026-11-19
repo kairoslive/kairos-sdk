@@ -1,6 +1,6 @@
 # Kairos SDK
 
-One TypeScript package for Kairos: market data, trader stats, wallet trading, and external signing. No runtime dependencies, works in browsers and Node 20+.
+One TypeScript package for Kairos market data, Discover, streaming, trading, self-custody wallets, and external signing. No runtime dependencies, works in browsers and Node 20+.
 
 ```bash
 npm install @kairos.trade/sdk
@@ -31,6 +31,69 @@ for await (const m of kairos.markets.all('kalshi')) {
 ```
 
 Market data prices are on a 0–100 scale. Orders use 0–1.
+
+## Discover and matched events
+
+```ts
+const all = await kairos.data.discover({ category: 'sports', limit: 25 })
+const matched = await kairos.markets.events.list({
+  status: ['upcoming', 'live'],
+  executableVenue: ['polymarket', 'predictfun'],
+  sort: 'start_time',
+})
+
+const market = matched.events[0]?.markets?.[0]
+if (market) {
+  const detail = await kairos.markets.events.market(market.id)
+  console.log(detail.market.outcomes.yes, detail.market.route.market)
+}
+```
+
+`data.discover` includes single-venue listings. `markets.events` groups linked markets by event and supplies canonical outcomes, routing references and synthetic book IDs. Market-level executable venues depend on Kairos' catalogue, and wallet readiness depends on `wallet.status`. Use `markets.events.all()` to follow cursors or `markets.events.lookup(['predictfun:…'])` to find a match and its canonical side.
+
+## Live market data
+
+```ts
+const stream = kairos.stream({
+  onOpen: (live) => live.subscribe({
+    provider: 'synthetic',
+    contractId: market.books.yes,
+    topics: ['synthetic.quote'],
+  }),
+  onFrame: (frame) => {
+    if (frame.type === 'SyntheticQuote') console.log(frame.data.bestAsk, frame.data.priceExponent)
+  },
+})
+// Close the connection when the UI no longer needs it.
+stream.close()
+```
+
+The stream handles anonymous, bearer-token and server API-key access. Frames retain 64-bit values as `bigint`. Reopen after a disconnect and build order books from fresh snapshots before applying deltas.
+
+## Trading API
+
+The [Trading API](https://docs.kairos.trade/guides/cross-venue-routing) uses the authenticated account's own venue connections. Its route and combo calls are separate from self-custody wallet actions. Keep API-key secrets on the server.
+
+```ts
+const kairos = createKairos({
+  execution: { auth: { apiKey: { clientId, apiKey, apiSecret } } },
+})
+const ref = { provider: 'polymarket', market_id: '0x…' }
+const quote = await kairos.execution.routeQuote({ ...ref, side: 'yes', quantity: '50' })
+// Review the quote before routeBuy, and track the parent with routes().
+```
+
+`execution` also exposes route fee checks, linked-market preview/confirmation, routed close, and combo quote, buy, cash-out and redeem. `data.request`, `markets.request` and `execution.request` accept the paths, methods and inputs from their published OpenAPI specs and infer JSON responses. Use `.response` for response headers or binary bodies.
+
+## Partner webhooks
+
+```ts
+import { readWebhook } from '@kairos.trade/sdk'
+
+const rawBody = new Uint8Array(await request.arrayBuffer())
+const event = await readWebhook(rawBody, request.headers.get('Kairos-Signature'), endpointSecret)
+// Deduplicate using event.id before applying it.
+```
 
 ## Trader stats
 
@@ -101,7 +164,7 @@ Get your partner id and base URL from Kairos.
 
 ### Best price across venues
 
-Preview: staging only for now (elsewhere it answers `403`). When a market is linked on several venues, `routedOrder` buys at the best all-in price across them. The wallet signs one ordinary order per venue, cheapest first, switching chains as each venue needs.
+When a market is linked on several venues, `routedOrder` buys at the best all-in price across them. The wallet signs one ordinary order per venue, cheapest first, switching chains as each venue needs.
 
 ```ts
 const result = await kairos.wallet.routedOrder(wallet, {
@@ -110,15 +173,17 @@ const result = await kairos.wallet.routedOrder(wallet, {
   size: '50', // shares to receive, across all venues
   maxPrice: '0.35', // optional: highest price per share, venue fees included
   clientOrderId: 'acme-route-41', // optional: the same id returns the same action (409 once it has expired)
+}, {
+  approveRoute: (plan) => showRouteConfirmation(plan), // resolves true to sign
 })
 // result.legs: [{ venue: 'predictfun', status: 'placed', orderId: '…' }, { venue: 'polymarket', status: 'failed', errorCode: 'NO_MATCH' }]
 ```
 
-Buys only. Each step carries the whole plan in `step.route` and its place in `step.leg` (`{ index, of }`, 1-based), so `onStep` can show it before each signature. One leg failing doesn't stop the others. If at least one leg is placed it returns the result: check each leg's `status`, and read the wallet's orders before buying again after an `unknown` leg. If none is placed it throws `ActionFailedError`; `e.step.result` still lists every leg, and `e.outcomeUnknown` is true when one may be live. A market that can't be routed throws `KairosError` (`422`; with code `ROUTE_UNAVAILABLE` when no venue can take a leg right now, and the plan's `notes` in `e.body.route`).
+Buys only. To review in a separate screen, call `prepareRoutedOrder` and pass the returned step to `resumeAction` after confirmation. Use the matched catalog's `route.market` and canonical `Yes` or `No` when you start from `markets.events`. Each step carries the whole plan in `step.route` and its place in `step.leg` (`{ index, of }`, 1-based), so `onStep` can show it before each signature. One leg failing doesn't stop the others. If at least one leg is placed it returns the result: check each leg's `status`, and read the wallet's orders before buying again after an `unknown` leg. If none is placed it throws `ActionFailedError`; `e.step.result` still lists every leg, and `e.outcomeUnknown` is true when one may be live. A market that can't be routed throws `KairosError` (`422`; with code `ROUTE_UNAVAILABLE` when no venue can take a leg right now, and the plan's `notes` in `e.body.route`).
 
 ### Polymarket combos
 
-A combo (parlay) joins 2–10 Polymarket outcomes; it pays $1 a share only if every leg wins. Kairos gets a maker quote and the wallet signs the order that accepts it.
+The Partner API combo preview is available on staging. A combo (parlay) joins 2–10 Polymarket outcomes; it pays $1 a share only if every leg wins. Kairos gets a maker quote and the wallet signs the order that accepts it.
 
 ```ts
 const quote = await kairos.wallet.comboQuote(wallet, { legs: [leg1, leg2], side: 'buy', amount: '10' }) // nothing signed
@@ -142,8 +207,6 @@ Pass `partnerId` or `apiKey`, not both. The key is sent as `X-Client-Id`, `X-Api
 
 ## Fees
 
-Preview: staging only for now.
-
 Trading fees on trade plans add up per wallet and venue, and you pay them in one settlement. When a wallet owes at least your threshold, its next trade plan is refused with `FeeSettlementRequiredError` (`assetKey`, `owedRaw`, `thresholdRaw`).
 
 ```ts
@@ -159,9 +222,7 @@ On Polymarket the wallet signs once, with no gas. On Predict.fun it sends one tr
 
 ## Trade plans
 
-Preview: staging only for now.
-
-A trade plan is one buy that the wallet signs in a single batch, with a fee ceiling and deadlines. If the venue account is short, it can first bridge exactly the shortfall from the wallet's USDC on Polygon or Arbitrum. Set the wallet up on the venue first.
+A trade plan is one buy or sell that the wallet signs in a single batch, with a fee ceiling and deadlines. If the venue account is short, it can first bridge exactly the shortfall from the wallet's USDC on Polygon or Arbitrum. Set the wallet up on the venue first.
 
 ```ts
 const plan = await kairos.wallet.tradePlans.run(
@@ -175,11 +236,11 @@ const plan = await kairos.wallet.tradePlans.run(
 // plan.status: 'completed' (the venue accepted the order), or a failure such as 'funded_trade_failed'
 ```
 
+Sell plans support Polymarket and Predict.fun. Set `side: 'sell'` and review `tradeBudget.minProceedsRaw`; sells cannot use funding or on-chain dependencies. Pass `outcomeTokenId` when using a bare market reference if you have the venue token id.
+
 Before anything is signed, `run` checks the plan against your request. It throws `SafetyCheckError` if the wallet, market, side, price, size, deadlines, funding or budget differ, or if what the wallet would sign does not match the plan: it recomputes `planHash` and every `requestHash`, rebuilds the plan authorization, and checks the venue order and the funding permits amount by amount. It accepts only two changes: the outcome's canonical name, and Predict.fun turning GTC into a GTD that ends with the venue session. Prices and sizes must be canonical decimal strings (`'0.5'`, not `'0.50'`). `run` fills in `clientOrderId`, the `Idempotency-Key` and a `tradeSubmitBefore` 4 minutes out. Pass your own `idempotencyKey` to resume the same plan after a crash. `prepare`, `answer`, `execute`, `report`, `get` and `wait` let you run the steps yourself, including client-submitted funding, which `run` refuses.
 
 ## On-chain intents
-
-Preview: staging only for now.
 
 Split, merge or redeem a Polymarket binary market's position in the wallet's deposit wallet. Kairos builds the calls and the wallet signs twice, with no gas. Kairos then submits the batch and confirms it from a finalized block.
 
@@ -189,7 +250,7 @@ await kairos.wallet.onchain.merge(wallet, 'polymarket:0x…', '1000000')
 await kairos.wallet.onchain.redeem(wallet, 'polymarket:0x…', '1000000', { outcome: 0 }) // a resolved market
 ```
 
-Amounts are in base units (6 decimals). The SDK finds the deposit wallet from `status` and sends lowercase addresses. It throws `SafetyCheckError` before signing if the intent does not debit what you asked, if `intentHash` or either signing request does not match the terms, or if the batch is anything but the approval and the operation you asked for. Never broadcast the batch from the wallet yourself: the wallet would pay gas and Kairos would never confirm the intent.
+Amounts are in base units (6 decimals). Redeem supports Polymarket Router markets and combos. A wallet that needs the older CTF redemption path can use the low-level intent methods with its own calldata verifier. The SDK finds the deposit wallet from `status` and sends lowercase addresses. It throws `SafetyCheckError` before signing if the intent does not debit what you asked, if `intentHash` or either signing request does not match the terms, or if the batch is anything but the approval and the operation you asked for. Never broadcast the batch from the wallet yourself: the wallet would pay gas and Kairos would never confirm the intent.
 
 Fees, trade plans and on-chain intents need proof of who is calling. With a partner id, that is the wallet's sign-in token: the SDK signs in on first use, as it does for `orders`. With an API key, it is the key itself, and the key's account must own the wallet.
 
@@ -216,6 +277,8 @@ pnpm test          # unit tests, no network
 pnpm test:live     # against the public market data API
 pnpm typecheck
 pnpm build         # dist/ (ESM + .d.ts)
+pnpm generate:openapi
+pnpm generate:stream
 ```
 
 `examples/wallet.mjs` sets up a fresh wallet, places an order and cancels it against a Kairos node.
