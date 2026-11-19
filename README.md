@@ -61,7 +61,7 @@ const stream = kairos.stream({
     topics: ['synthetic.quote'],
   }),
   onFrame: (frame) => {
-    if (frame.type === 'SyntheticQuote') console.log(frame.data.bestAsk, frame.data.priceExponent)
+    if (frame.type === 'SyntheticQuote') console.log(frame.data.bestAsk, frame.data.priceUnitExponent)
   },
 })
 // Close the connection when the UI no longer needs it.
@@ -274,11 +274,14 @@ await client.submit(intent.payload_id, signature)
 ```bash
 pnpm install
 pnpm test          # unit tests, no network
-pnpm test:live     # against the public market data API
+pnpm test:live     # against production
+KAIROS_ENV=staging pnpm test:live
 pnpm typecheck
 pnpm build         # dist/ (ESM + .d.ts)
 pnpm generate:openapi
 pnpm generate:stream
 ```
+
+The live suite covers market data, Discover, WebSocket frames, trader positions, and the Trading API credential requirement. Set `KAIROS_PARTNER_ID` to also check wallet status and the setup prerequisite with an unfunded test address. Live checks never sign or submit an order. Use Node 22+ to include WebSocket checks. Set `KAIROS_TRADER_WALLET` to check a specific wallet and use `KAIROS_MARKET_DATA_URL`, `KAIROS_DATA_URL`, `KAIROS_EXECUTION_URL` or `KAIROS_STREAM_URL` to override individual hosts.
 
 `examples/wallet.mjs` sets up a fresh wallet, places an order and cancels it against a Kairos node.
