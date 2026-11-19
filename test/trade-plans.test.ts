@@ -15,13 +15,26 @@ const INPUT: TradePlanInput = { wallet: CHECKSUMMED, order: { market: MARKET, ou
 
 const TRADING = "0x" + "22".repeat(20);
 const EXCHANGE = "0xe111180000d2663c0091e4f400237545b87b996b";
+const NEW_EXCHANGE = "0xe3333700ca9d93003f00f0f71f8515005f6c00aa";
+const PREDICT_EXCHANGE = "0x8bc070bedab741406f4b1eb65a72bee27894b689";
+const PUSD = "0xc011a7e12a19f7b1f670d46f03b03f3342e82dfb";
+const USDT = "0x55d398326f99059ff775485246999027b3197955";
+const SELL_INPUT: TradePlanInput = { wallet: CHECKSUMMED, order: { market: MARKET, outcome: "yes", side: "sell", price: "0.6", size: "10" } };
 const PROXY = "0x5567954cd026cebfe486062cb75848e0f1c12e58";
 const ARB_USDC = "0xaf88d065e77c8cc2239327c5edb3a432268e5831";
 const FUNDING = { sourceChainId: "42161", sourceToken: ARB_USDC, maxAmountRaw: "600000", slippageBps: 50 };
 const unix = (at: string) => String(Date.parse(at) / 1000);
-const units = (v: string, d: number) => BigInt(Math.round(Number(v) * 1e6)) * 10n ** BigInt(d - 6);
+const units = (v: string, d: number) => {
+  const [whole, fraction = ""] = v.split(".");
+  return BigInt(whole + fraction.padEnd(d, "0").slice(0, d));
+};
+const fields = (names: string) => names.split(" ").map((field) => {
+  const [name, type] = field.split(":");
+  return { name, type };
+});
+const EIP712_DOMAIN = fields("name:string version:string chainId:uint256 verifyingContract:address");
 
-/** The venue order the server asks the wallet to sign for the plan's buy. */
+/** The venue order the server asks the wallet to sign. */
 function tradeDoc(p: TradePlan): Record<string, unknown> {
   const o = p.order;
   if (p.venue === "hyperliquid") {
@@ -32,26 +45,38 @@ function tradeDoc(p: TradePlan): Record<string, unknown> {
       message: { wallet: CHECKSUMMED, market: o.market, outcome: o.outcome, side: "buy", price: o.price, size: o.size, timeInForce: o.timeInForce, postOnly: o.postOnly, action: p.id, expiresAt: Number(unix(p.tradeSubmitBefore)) },
     };
   }
+  const sell = o.side === "sell";
+  const shares = units(o.size, p.tradeBudget.decimals).toString();
+  const makerAmount = sell ? shares : p.tradeBudget.notionalRaw;
+  const takerAmount = sell ? p.tradeBudget.minProceedsRaw ?? "0" : shares;
+  const side = sell ? 1 : 0;
   if (p.venue === "polymarket") {
     return {
-      types: {},
+      types: {
+        EIP712Domain: EIP712_DOMAIN,
+        Order: fields("salt:uint256 maker:address signer:address tokenId:uint256 makerAmount:uint256 takerAmount:uint256 side:uint8 signatureType:uint8 timestamp:uint256 metadata:bytes32 builder:bytes32"),
+        TypedDataSign: fields("contents:Order name:string version:string chainId:uint256 verifyingContract:address salt:bytes32"),
+      },
       primaryType: "TypedDataSign",
       domain: { name: "Polymarket CTF Exchange", version: "2", chainId: 137, verifyingContract: EXCHANGE },
       message: {
-        contents: { salt: "7", maker: TRADING, signer: TRADING, tokenId: "123", makerAmount: p.tradeBudget.notionalRaw, takerAmount: units(o.size, 6).toString(), side: 0, signatureType: 3, timestamp: "1", metadata: HASH, builder: HASH },
+        contents: { salt: "7", maker: TRADING, signer: TRADING, tokenId: "123", makerAmount, takerAmount, side, signatureType: 3, timestamp: "1", metadata: HASH, builder: HASH },
         name: "DepositWallet",
         version: "1",
         chainId: 137,
         verifyingContract: TRADING,
-        salt: HASH,
+        salt: "0x" + "00".repeat(32),
       },
     };
   }
   return {
-    types: {},
+    types: {
+      EIP712Domain: EIP712_DOMAIN,
+      Order: fields("salt:uint256 maker:address signer:address taker:address tokenId:uint256 makerAmount:uint256 takerAmount:uint256 expiration:uint256 nonce:uint256 feeRateBps:uint256 side:uint8 signatureType:uint8"),
+    },
     primaryType: "Order",
-    domain: { name: "predict.fun CTF Exchange", version: "1", chainId: 56, verifyingContract: "0x" + "8b".repeat(20) },
-    message: { salt: "7", maker: W, signer: W, taker: "0x" + "00".repeat(20), tokenId: "123", makerAmount: p.tradeBudget.notionalRaw, takerAmount: units(o.size, 18).toString(), expiration: o.expiresAt ? unix(o.expiresAt) : "0", nonce: "0", feeRateBps: "0", side: 0, signatureType: 0 },
+    domain: { name: "predict.fun CTF Exchange", version: "1", chainId: 56, verifyingContract: PREDICT_EXCHANGE },
+    message: { salt: "7", maker: W, signer: W, taker: "0x" + "00".repeat(20), tokenId: "123", makerAmount, takerAmount, expiration: o.expiresAt ? unix(o.expiresAt) : "0", nonce: "0", feeRateBps: "0", side, signatureType: 0 },
   };
 }
 
@@ -85,7 +110,10 @@ function seal(p: TradePlan): void {
 function planFor(body: Record<string, any>, edit: (p: TradePlan) => void = () => {}, tamper: (p: TradePlan) => void = () => {}, docs: (d: any, id: string) => void = () => {}): TradePlan {
   const venue = body.order.market.split(":")[0];
   const decimals = venue === "predictfun" ? 18 : 6;
-  const notional = (units(body.order.price, decimals) * units(body.order.size, 6)) / 10n ** 6n;
+  const proceeds = (units(body.order.price, decimals) * units(body.order.size, decimals)) / 10n ** BigInt(decimals);
+  const sell = body.order.side === "sell";
+  const notional = sell ? units(body.order.size, decimals) : proceeds;
+  const fee = sell ? (notional * 75n + 9999n) / 10000n : 16750n;
   const plan: TradePlan = {
     contractVersion: 1,
     id: "00000000-0000-0000-0000-000000000001",
@@ -102,7 +130,12 @@ function planFor(body: Record<string, any>, edit: (p: TradePlan) => void = () =>
     order: { ...body.order, outcome: venue === "hyperliquid" ? "#110" : body.order.outcome === "yes" ? "Yes" : body.order.outcome },
     tradingWallet: venue === "polymarket" ? TRADING : W,
     tradePayloadDigest: HASH,
-    tradeBudget: { collateral: { kind: "evm", chainId: venue === "predictfun" ? "56" : "137", token: "0xc011" }, decimals, notionalRaw: notional.toString(), maxCollateralFeeRaw: "16750", maxPlatformFeeBps: 75, maxDebitRaw: (notional + 16750n).toString(), existingSpendableRaw: "0" },
+    tradeBudget: {
+      collateral: { kind: "evm", chainId: venue === "predictfun" ? "56" : "137", token: venue === "predictfun" ? USDT : PUSD },
+      decimals, notionalRaw: notional.toString(), maxCollateralFeeRaw: fee.toString(), maxPlatformFeeBps: 75,
+      maxDebitRaw: sell ? "0" : (notional + fee).toString(), existingSpendableRaw: "0",
+      ...(sell ? { minProceedsRaw: proceeds.toString() } : {}),
+    },
     funding: null,
     createdAt: "2026-10-28T12:00:00Z",
     executeBefore: body.tradeSubmitBefore,
@@ -193,7 +226,7 @@ test("tradePlans.run: refuses, before signing, a plan whose order was rewritten"
   const rewrites: [string, (p: TradePlan) => void][] = [
     ["price", (p) => (p.order.price = "0.06")],
     ["size", (p) => (p.order.size = "100")],
-    ["side", (p) => ((p.order as { side: string }).side = "sell")],
+    ["side", (p) => (p.order.side = "sell")],
     ["market", (p) => (p.order.market = "polymarket:0x" + "ef".repeat(32))],
     ["outcome", (p) => (p.order.outcome = "No")],
     ["wallet", (p) => (p.wallet = "0x" + "99".repeat(20))],
@@ -229,6 +262,94 @@ test("tradePlans.run: refuses, before signing, a plan whose order was rewritten"
     assert.deepEqual(wallet.methods(), ["personal_sign"], `${what}: only the login was signed`);
     assert.ok(!calls.some((c) => c.path.endsWith("/execute")), `${what}: never executed`);
   }
+});
+
+test("tradePlans.run: signs a Polymarket sell under the exact share and proceeds amounts with zero debit", async () => {
+  for (const version of ["2", "3"]) {
+    const { impl, prepared, calls } = planServer(undefined, undefined, (doc) => {
+      if (version === "3") Object.assign(doc.domain, { version: "3", verifyingContract: NEW_EXCHANGE });
+    });
+    const signed: string[] = [];
+    const plan = await clientWith(impl).run(SELL_INPUT, {
+      maxDebitRaw: 0n, outcomeTokenId: "123", onSign: (request) => signed.push(request.id),
+    });
+    assert.equal(plan.status, "completed");
+    assert.equal(prepared().funding, null);
+    assert.deepEqual(signed, ["plan", "trade"]);
+    assert.deepEqual(prepared().tradeBudget, {
+      collateral: { kind: "evm", chainId: "137", token: PUSD }, decimals: 6, notionalRaw: "10000000",
+      minProceedsRaw: "6000000", maxCollateralFeeRaw: "75000", maxPlatformFeeBps: 75, maxDebitRaw: "0", existingSpendableRaw: "0",
+    });
+    const { message } = JSON.parse(prepared().requests[1].request.params[1] as string);
+    assert.deepEqual([message.contents.side, message.contents.makerAmount, message.contents.takerAmount], [1, "10000000", "6000000"]);
+    assert.equal(calls.filter((call) => call.path.endsWith("/execute")).length, 1);
+  }
+});
+
+test("tradePlans.run: signs a Predict.fun sell in 18-decimal raw amounts and accepts a session-bound expiry", async () => {
+  const { impl, prepared } = planServer((plan) => {
+    plan.order.timeInForce = "GTD";
+    plan.order.expiresAt = new Date(Date.parse(plan.tradeSubmitBefore) + 60_000).toISOString().replace(".000", "");
+  });
+  const market = {
+    exchange_id: "predictfun", market_id: "1027194", condition_id: null,
+    outcomes: [{ outcome: "Yes", normalized_outcome: "yes", token_id: "123" }],
+  };
+  const plan = await clientWith(impl).run({ ...SELL_INPUT, order: { ...SELL_INPUT.order, market } });
+  assert.equal(plan.status, "completed");
+  assert.equal(plan.order.timeInForce, "GTD");
+  assert.equal(plan.tradeBudget.notionalRaw, "10000000000000000000");
+  assert.equal(plan.tradeBudget.minProceedsRaw, "6000000000000000000");
+  assert.equal(plan.tradeBudget.maxCollateralFeeRaw, "75000000000000000");
+  assert.equal(plan.tradeBudget.maxDebitRaw, "0");
+  assert.equal(prepared().requests[1].chainId, "0x38");
+  const { message } = JSON.parse(prepared().requests[1].request.params[1] as string);
+  assert.deepEqual([message.side, message.makerAmount, message.takerAmount], [1, "10000000000000000000", "6000000000000000000"]);
+});
+
+test("tradePlans.run: refuses altered sell amounts, budget, signing identity and outcome token", async () => {
+  const editPlan: [string, (plan: TradePlan) => void][] = [
+    ["notional", (plan) => (plan.tradeBudget.notionalRaw = "6000000")],
+    ["minimum proceeds", (plan) => (plan.tradeBudget.minProceedsRaw = "5999999")],
+    ["collateral debit", (plan) => (plan.tradeBudget.maxDebitRaw = "1")],
+    ["fees", (plan) => (plan.tradeBudget.maxCollateralFeeRaw = "75001")],
+    ["fee rate", (plan) => (plan.tradeBudget.maxPlatformFeeBps = 1001)],
+    ["wrong collateral", (plan) => (plan.tradeBudget.collateral = { kind: "evm", chainId: "137", token: USDT })],
+    ["wrong decimals", (plan) => (plan.tradeBudget.decimals = 18)],
+  ];
+  const editDoc: [string, (doc: any) => void][] = [
+    ["wrong side", (doc) => (doc.message.contents.side = 0)],
+    ["shares sold", (doc) => (doc.message.contents.makerAmount = "10000001")],
+    ["collateral proceeds", (doc) => (doc.message.contents.takerAmount = "5999999")],
+    ["wrong token", (doc) => (doc.message.contents.tokenId = "321")],
+    ["untrusted exchange", (doc) => (doc.domain.verifyingContract = TRADING)],
+    ["wrong type", (doc) => (doc.types.Order[3].type = "bytes32")],
+    ["wrong seller", (doc) => (doc.message.contents.signer = W)],
+  ];
+  for (const [name, edits] of [
+    ...editPlan.map(([name, edit]) => [name, { edit }] as const),
+    ...editDoc.map(([name, docs]) => [name, { docs }] as const),
+  ]) {
+    const { impl, calls } = planServer("edit" in edits ? edits.edit : undefined, undefined, "docs" in edits ? edits.docs : undefined);
+    const wallet = fakeWallet();
+    await assert.rejects(clientWith(impl, wallet.provider).run(SELL_INPUT, { outcomeTokenId: "123" }), SafetyCheckError, name);
+    assert.deepEqual(wallet.methods(), ["personal_sign"], name);
+    assert.ok(!calls.some((call) => call.path.endsWith("/execute")), name);
+  }
+});
+
+test("tradePlans.run: pins a market object's outcome token for Predict.fun before requesting the trade signature", async () => {
+  const { impl } = planServer(undefined, undefined, (doc) => (doc.message.tokenId = "124"));
+  const market = {
+    exchange_id: "predictfun", market_id: "1027194", condition_id: null,
+    outcomes: [{ outcome: "Yes", normalized_outcome: "yes", token_id: "123" }],
+  };
+  const wallet = fakeWallet();
+  await assert.rejects(
+    clientWith(impl, wallet.provider).run({ ...SELL_INPUT, order: { ...SELL_INPUT.order, market } }),
+    (error) => error instanceof SafetyCheckError && /outcome token/.test(error.message),
+  );
+  assert.deepEqual(wallet.methods(), ["personal_sign"]);
 });
 
 test("tradePlans.run: accepts the documented rewrites (canonical outcome, Predict.fun GTC becoming session-bound GTD)", async () => {
@@ -267,7 +388,11 @@ test("tradePlans.prepare: checks canonical numbers and order rules before sendin
   await assert.rejects(plans.prepare({ ...INPUT, order: { ...order, price: "1.5" } }), /between 0 and 1/);
   await assert.rejects(plans.prepare({ ...INPUT, order: { ...order, size: "1e3" } }), /canonical/);
   await assert.rejects(plans.prepare({ ...INPUT, order: { ...order, timeInForce: "GTD" } }), /expiresAt/);
-  await assert.rejects(plans.prepare({ ...INPUT, order: { ...order, side: "sell" as "buy" } }), /buys only/);
+  await assert.rejects(plans.prepare({ ...SELL_INPUT, order: { ...SELL_INPUT.order, market: "hyperliquid:123" } }), /only on Polymarket and Predict.fun/);
+  await assert.rejects(plans.prepare({ ...SELL_INPUT, funding: FUNDING }), /do not accept funding/);
+  await assert.rejects(plans.prepare({ ...SELL_INPUT, ctfDependencies: ["test"] }), /on-chain prerequisites/);
+  await assert.rejects(plans.prepare({ ...SELL_INPUT, order: { ...SELL_INPUT.order, price: "0.1234567", size: "1" } }), /collateral precision/);
+  await assert.rejects(plans.prepare({ ...SELL_INPUT, order: { ...SELL_INPUT.order, price: "0.6", size: "0.0000001" } }), /share precision/);
   await assert.rejects(plans.prepare({ ...INPUT, tradeSubmitBefore: "2026-10-28T12:00:00.500Z" }), /whole seconds/);
   await assert.rejects(plans.prepare({ ...INPUT, funding: { sourceChainId: "42161", sourceToken: "0x" + "af".repeat(20), maxAmountRaw: "007", slippageBps: 50 } }), /maxAmountRaw/);
   assert.equal(calls.length, 0);

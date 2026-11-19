@@ -460,6 +460,13 @@ export interface ApiKeyCredentials {
   apiSecret: string;
 }
 
+export interface RunActionOptions extends CallOptions {
+  /** Called once with the routed plan before its first signature. False stops execution. */
+  approveRoute?: (route: Readonly<RoutePlan>) => boolean | Promise<boolean>;
+}
+
+export type ActionAnswer = { signature: string } | { result: unknown };
+
 export interface WalletClientOptions {
   /** Your partner id from Kairos, sent as `X-Kairos-Partner-Id`. Pass this or `apiKey`, not both. */
   partnerId?: string;
@@ -591,10 +598,13 @@ export class WalletClient {
    * venue, cheapest first. Done when at least one leg was placed; check each leg's `status` in the result. When none was
    * placed it throws `ActionFailedError`, whose `step.result` still lists every leg.
    */
-  routedOrder(wallet: string, order: RoutedOrderInput, opts: CallOptions = {}): Promise<RoutedOrderResult> {
-    const { market, size, maxPrice, ...rest } = order;
-    const limit = maxPrice === undefined ? {} : { maxPrice: String(maxPrice) };
-    return this.run<RoutedOrderResult>(wallet, { type: "routedOrder", market: marketRef(market), ...rest, size: String(size), ...limit }, opts);
+  routedOrder(wallet: string, order: RoutedOrderInput, opts: RunActionOptions = {}): Promise<RoutedOrderResult> {
+    return this.run<RoutedOrderResult>(wallet, routedAction(order), opts);
+  }
+
+  /** Start a route without signing, e.g. to display its plan in a separate review screen. */
+  prepareRoutedOrder(wallet: string, order: RoutedOrderInput, opts: CallOptions = {}): Promise<Step<RoutedOrderResult>> {
+    return this.startAction<RoutedOrderResult>(wallet, routedAction(order), opts);
   }
 
   /** Price a Polymarket combo with a live maker quote. Nothing is signed. */
@@ -615,7 +625,7 @@ export class WalletClient {
 
   /** The trading wallet's Polymarket combos. Logs in first if there is no usable token. */
   async combos(wallet: string, opts: CallOptions = {}): Promise<WalletCombo[]> {
-    const page = await this.callerRequest<{ tradingWallet: string; combos: WalletCombo[] }>(wallet, "GET", `/v3/wallets/${wallet}/combos`, { signal: opts.signal }, true);
+    const page = await this.callerRequest<{ tradingWallet: string; combos: WalletCombo[] }>(wallet, "GET", `/v3/wallets/${encodeURIComponent(wallet)}/combos`, { signal: opts.signal }, true);
     return page.combos;
   }
 
@@ -684,26 +694,60 @@ export class WalletClient {
     return opts?.signal ?? this.defaultSignal;
   }
 
+  startAction<R = unknown>(wallet: string, action: Action, opts: CallOptions = {}): Promise<Step<R>> {
+    return this.http.post("/v3/actions", { wallet, action }, undefined, this.signalFor(opts));
+  }
+
   getAction<R = unknown>(id: string, opts: CallOptions = {}): Promise<Step<R>> {
-    return this.http.get<Step<R>>(`/v3/actions/${id}`, undefined, undefined, this.signalFor(opts));
+    return this.http.get<Step<R>>(actionPath(id), undefined, undefined, this.signalFor(opts));
+  }
+
+  answerAction<R = unknown>(id: string, answer: ActionAnswer, opts: CallOptions = {}): Promise<Step<R>> {
+    return this.http.post(actionPath(id), answer, undefined, this.signalFor(opts));
   }
 
   /** Run any action to completion: sign each step with the provider and return the result. */
-  async run<R = unknown>(wallet: string, action: Action, opts: CallOptions = {}): Promise<R> {
+  async run<R = unknown>(wallet: string, action: Action, opts: RunActionOptions = {}): Promise<R> {
+    const step = await this.startAction<R>(wallet, action, opts);
+    if (action.type === "comboQuote" && step.type !== "comboQuote") {
+      throw new ActionFailedError({ ...step, error: "the server returned a different action for the combo quote" });
+    }
+    return this.resumeAction(step, opts);
+  }
+
+  /** Continue a prepared action. Supply the originally reviewed step to detect any plan changes. */
+  async resumeAction<R = unknown>(initial: Step<R>, opts: RunActionOptions = {}): Promise<R> {
     const signal = this.signalFor(opts);
     const deadline = Date.now() + this.timeoutMs;
     const read = (id: string) => retryTransient(() => this.getAction<R>(id, { signal }), deadline, this.pollIntervalMs, signal);
-    let step = await this.http.post<Step<R>>("/v3/actions", { wallet, action }, undefined, signal);
+    let step = initial;
+    const routed = initial.type === "routed_order";
+    let plan = initial.route && JSON.stringify(initial.route);
+    let approved = false;
     // An answer that got no clean reply, re-sent instead of prompting the wallet again if the same request is still open.
-    let retry: { request: string; answer: StepAnswer } | undefined;
+    let retry: { request: string; answer: ActionAnswer } | undefined;
     let busy = 0;
     for (;;) {
+      signal?.throwIfAborted();
+      if ((routed || initial.type === "comboQuote") && (step.id !== initial.id || step.type !== initial.type)) {
+        throw new ActionFailedError({ ...step, error: "the server changed the action" });
+      }
       switch (step.status) {
         case "done":
           return step.result as R;
         case "failed":
           throw new ActionFailedError(step);
         case "needs_signature": {
+          if (step.type === "comboQuote") throw new ActionFailedError({ ...step, error: "a combo quote cannot ask for a signature" });
+          if (routed && (plan || opts.approveRoute)) {
+            if (!step.route || (plan && JSON.stringify(step.route) !== plan)) throw new ActionFailedError({ ...step, error: "the routed plan changed" });
+            plan ??= JSON.stringify(step.route);
+            if (!approved && opts.approveRoute) {
+              if (!(await opts.approveRoute(structuredClone(step.route)))) throw new ActionFailedError({ ...step, error: "the routed plan was declined" });
+              approved = true;
+              signal?.throwIfAborted();
+            }
+          }
           if (!step.request) throw new ActionFailedError({ ...step, error: "step has no signing request" });
           const key = JSON.stringify(step.request);
           let answer = retry?.request === key ? retry.answer : undefined;
@@ -714,7 +758,7 @@ export class WalletClient {
             answer = await onChain(this.provider, open.chainId, () => this.answer(open), signal);
           }
           try {
-            step = await this.http.post<Step<R>>(`/v3/actions/${step.id}`, answer, undefined, signal);
+            step = await this.answerAction<R>(step.id, answer, { signal });
             busy = 0;
           } catch (e) {
             // Another request holds the action, or the answer may have landed unseen: read it and carry on from where it is.
@@ -741,7 +785,7 @@ export class WalletClient {
   }
 
   /** A signature comes back as `signature`; sent transactions as `result`. */
-  private async answer(step: Step): Promise<StepAnswer> {
+  private async answer(step: Step): Promise<ActionAnswer> {
     const request = step.request!;
     if (request.method === "wallet_sendCalls" || request.method === "eth_sendTransaction") {
       try {
@@ -764,7 +808,15 @@ export interface OrdersQuery extends CallOptions {
   venue?: Venue;
 }
 
-type StepAnswer = { signature: string } | { result: unknown };
+function actionPath(id: string): string {
+  return `/v3/actions/${encodeURIComponent(id)}`;
+}
+
+function routedAction(order: RoutedOrderInput): Extract<Action, { type: "routedOrder" }> {
+  const { market, size, maxPrice, ...rest } = order;
+  const limit = maxPrice === undefined ? {} : { maxPrice: String(maxPrice) };
+  return { type: "routedOrder", market: marketRef(market), ...rest, size: String(size), ...limit };
+}
 
 function isBusy(e: unknown): boolean {
   return e instanceof KairosError && e.status === 409 && /busy/i.test(e.message);
@@ -772,7 +824,7 @@ function isBusy(e: unknown): boolean {
 
 // A working order or cancel may still land after the client stops waiting.
 function timeoutCode(step: Step): ActionErrorCode | undefined {
-  if (step.type === "order" || step.type === "routed_order") return "ORDER_OUTCOME_UNKNOWN";
+  if (step.type === "order" || step.type === "routed_order" || step.type === "combo") return "ORDER_OUTCOME_UNKNOWN";
   if (step.type === "cancel") return "CANCEL_OUTCOME_UNKNOWN";
   return step.errorCode;
 }

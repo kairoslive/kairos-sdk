@@ -10,7 +10,7 @@ import { CHECKSUMMED, TOKEN, fakeFetch, fakeWallet, loginRoutes, type Call } fro
 const W = CHECKSUMMED.toLowerCase();
 const DEPOSIT = "0xDdDd000000000000000000000000000000000002";
 const D = DEPOSIT.toLowerCase();
-const CONDITION = "0x" + "01".repeat(32);
+const CONDITION = "0x" + "01".repeat(31) + "00";
 const HASH = "0x" + "9a".repeat(32);
 const ID = "00000000-0000-0000-0000-0000000000a1";
 const CONSENT_SIG = "0x" + "c1".repeat(65);
@@ -112,7 +112,7 @@ test("onchain.split: lowercase addresses, deposit wallet from status, Idempotenc
   assert.equal(body.outcome, undefined);
   assert.deepEqual(body.dependencies, []);
   const deadline = Date.parse(body.executeBefore) / 1000;
-  assert.ok(Number.isInteger(deadline) && deadline >= before + 239 && deadline <= before + 242);
+  assert.ok(Number.isInteger(deadline) && deadline >= before + 959 && deadline <= before + 962);
 
   assert.deepEqual(wallet.methods(), ["personal_sign", "eth_chainId", "wallet_switchEthereumChain", "eth_signTypedData_v4", "eth_signTypedData_v4"]);
   assert.deepEqual(wallet.requests[2].params, [{ chainId: "0x89" }]);
@@ -133,6 +133,7 @@ test("onchain: refuses to sign an intent that debits a different amount or anoth
     ["later", (v: OnchainIntentView) => (v.intent.terms.executeBefore = "2999-01-01T00:00:00Z")],
     ["operator", (v: OnchainIntentView) => (v.intent.terms.batch.calls[0].data = v.intent.terms.batch.calls[0].data.slice(0, 10) + "77".repeat(32) + v.intent.terms.batch.calls[0].data.slice(74))],
     ["approval token", (v: OnchainIntentView) => (v.intent.terms.batch.calls[0].target = "0x" + "44".repeat(20))],
+    ["condition", (v: OnchainIntentView) => (v.intent.terms.batch.calls[1].data = v.intent.terms.batch.calls[1].data.replace(CONDITION.slice(2), "44".repeat(32)))],
     ["op amount", (v: OnchainIntentView) => (v.intent.terms.batch.calls[1].data = v.intent.terms.batch.calls[1].data.slice(0, 266) + "f".repeat(64) + v.intent.terms.batch.calls[1].data.slice(330))],
     ["extra transfer", (v: OnchainIntentView) => v.intent.terms.batch.calls.push({ target: "0xc011a7e12a19f7b1f670d46f03b03f3342e82dfb", value: "0", data: "0xa9059cbb" + "77".repeat(32) + "00".repeat(32) })],
     ["split for merge", (v: OnchainIntentView) => (v.intent.terms.batch.calls = callsFor("split", 1000000n))],

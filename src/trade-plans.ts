@@ -1,10 +1,11 @@
-// Trade plans (/v3/trade-plans), preview: one buy, signed up front in one batch with a fee ceiling and deadlines.
+// Trade plans (/v3/trade-plans), preview: one buy or sell, signed up front in one batch with a fee ceiling and deadlines.
 // When the venue account is short, a plan can first bridge exactly the shortfall from the wallet's USDC on Polygon or Arbitrum.
 
 import {
   SafetyCheckError,
   WaitTimeoutError,
   canonicalDecimal,
+  canonicalJson,
   canonicalRaw,
   idempotencyKey,
   lowerAddress,
@@ -29,12 +30,14 @@ import {
   type MarketRef,
   type TypedDoc,
 } from "./common.ts";
-import type { TimeInForce, Venue, WalletContext } from "./wallets.ts";
+import type { Side, TimeInForce, Venue, WalletContext } from "./wallets.ts";
 import {
   CTF_EXCHANGE_V1_LOWER,
   CTF_EXCHANGE_V2_LOWER,
+  EXCHANGE_V3_LOWER,
   NEG_RISK_CTF_EXCHANGE_V1_LOWER,
   NEG_RISK_CTF_EXCHANGE_V2_LOWER,
+  PUSD_LOWER,
 } from "./signing/polymarket-contracts.generated.ts";
 
 /** `needs_wallet_action` and `refunded` are reserved: the server does not send them today. */
@@ -57,7 +60,7 @@ export interface TradePlanOrder {
   /** `venue:market_id`. */
   market: string;
   outcome: string;
-  side: "buy";
+  side: Side;
   price: string;
   size: string;
   timeInForce: TimeInForce;
@@ -85,10 +88,14 @@ export interface TradePlanInput {
   /** The wallet that signs and owns the plan. */
   wallet: string;
   order: {
-    market: MarketRef;
+    /** A venue market ref, or market metadata to also pin the selected outcome's token. */
+    market: string | (Omit<Exclude<MarketRef, string>, "condition_id"> & {
+      condition_id?: string | null;
+      outcomes?: readonly { outcome: string; normalized_outcome?: string; token_id: string }[];
+    });
     outcome: string;
-    /** Plans are buy-only. */
-    side?: "buy";
+    /** Defaults to buy. Sell plans are available on Polymarket and Predict.fun. */
+    side?: Side;
     /** 0–1, canonical: `"0.5"`, not `"0.50"`. */
     price: string | number;
     /** Shares, canonical, matching the venue's share lot. */
@@ -102,7 +109,7 @@ export interface TradePlanInput {
     /** GTD only: a `Date`, unix seconds, or RFC 3339 with whole seconds. Must be after `tradeSubmitBefore`. */
     expiresAt?: Date | number | string;
   };
-  /** Omit when the collateral is already at the venue. */
+  /** Buys only. Omit when the collateral is already at the venue. */
   funding?: TradePlanFundingInput | null;
   /** Who submits the funding permits. The SDK's `run` supports only `"kairos"` (the default). */
   submission?: { funding?: "kairos" | "client"; trade?: "kairos" };
@@ -132,16 +139,19 @@ export interface PartnerFeeTerms {
   taker: FeeShape;
 }
 
-/** The most the plan can spend, in collateral base units. */
+/** Cost and fee bounds in collateral base units. */
 export interface TradeBudget {
   collateral: Collateral;
   decimals: number;
+  /** Buy collateral before fees, or maximum gross sell proceeds (one unit per share). */
   notionalRaw: string;
-  /** Platform fee bound plus the venue fee bound. */
+  /** Gross proceeds at the sell limit price. Absent for buys. */
+  minProceedsRaw?: string;
+  /** Platform fee bound, plus the venue fee bound for buys. */
   maxCollateralFeeRaw: string;
   /** Kairos and partner fee ceiling together, at most 1000 (10%). */
   maxPlatformFeeBps: number;
-  /** `notionalRaw + maxCollateralFeeRaw`: the most the wallet authorizes. */
+  /** Most collateral the buy can debit, or "0" for sells. */
   maxDebitRaw: string;
   /** What the venue account could already spend when the plan was prepared. */
   existingSpendableRaw: string;
@@ -273,6 +283,8 @@ export interface RunTradePlanOptions extends TradePlanWaitOptions {
   idempotencyKey?: string;
   /** Refuse to sign when the plan could debit more collateral than this (base units). */
   maxDebitRaw?: string | bigint;
+  /** Pin the ERC-1155 outcome token when supplying a string market reference. */
+  outcomeTokenId?: string | bigint;
   /** Called before each signature, e.g. to explain it in your UI. */
   onSign?: (request: TradePlanWalletRequest, plan: TradePlan) => void;
 }
@@ -350,10 +362,11 @@ export class TradePlansClient {
     }
     const signal = this.ctx.signal(opts);
     const body = prepareBody(input);
+    const tokenId = expectedOutcomeToken(input, body.order, opts.outcomeTokenId);
     let plan = await this.send(body, opts.idempotencyKey ?? idempotencyKey(), { signal });
     if (TERMINAL.has(plan.status)) return plan;
     if (plan.execution.committed) return this.wait(plan.id, body.wallet, opts, plan);
-    checkPrepared(plan, body, opts);
+    checkPrepared(plan, body, opts, tokenId);
 
     const answers: TradePlanAnswer[] = [];
     for (const req of plan.requests) {
@@ -394,7 +407,11 @@ interface PrepareBody {
 /** The wire body, with the server's value rules checked here so mistakes fail before a round trip. */
 function prepareBody(input: TradePlanInput): PrepareBody {
   const o = input.order;
-  if ((o.side ?? "buy") !== "buy") throw new Error("trade plans accept buys only");
+  const side = o.side ?? "buy";
+  if (side !== "buy" && side !== "sell") throw new Error("side must be buy or sell");
+  const market = typeof o.market === "string"
+    ? o.market
+    : marketRef({ ...o.market, condition_id: o.market.condition_id ?? undefined });
   const price = canonicalDecimal(o.price, "price");
   if (!price.startsWith("0.")) throw new Error("price must be between 0 and 1");
   const timeInForce = o.timeInForce ?? "GTC";
@@ -404,9 +421,9 @@ function prepareBody(input: TradePlanInput): PrepareBody {
   const clientOrderId = o.clientOrderId ?? randomClientOrderId();
   if (!/^[\x21-\x7e]{1,128}$/.test(clientOrderId)) throw new Error("clientOrderId must be 1–128 visible ASCII characters");
   const order: TradePlanOrder = {
-    market: marketRef(o.market),
+    market: side === "sell" && !market.includes(":") ? `polymarket:${market}` : market,
     outcome: o.outcome,
-    side: "buy",
+    side,
     price,
     size: canonicalDecimal(o.size, "size"),
     timeInForce,
@@ -415,6 +432,7 @@ function prepareBody(input: TradePlanInput): PrepareBody {
     ...(o.expiresAt !== undefined ? { expiresAt: rfc3339(o.expiresAt) } : {}),
   };
   const f = input.funding;
+  if (side === "sell") validateSellInput(order, input);
   const funding = f
     ? {
         sourceChainId: canonicalRaw(f.sourceChainId, "funding.sourceChainId", { positive: true }),
@@ -433,6 +451,19 @@ function prepareBody(input: TradePlanInput): PrepareBody {
     tradeSubmitBefore: input.tradeSubmitBefore !== undefined ? rfc3339(input.tradeSubmitBefore) : secondsFromNow(240),
     ...(input.ctfDependencies?.length ? { ctfDependencies: input.ctfDependencies } : {}),
   };
+}
+
+function validateSellInput(order: TradePlanOrder, input: TradePlanInput): void {
+  const venue = order.market.split(":")[0];
+  if (!isSellVenue(venue)) throw new Error("sell plans are available only on Polymarket and Predict.fun");
+  if (input.funding || input.ctfDependencies?.length) throw new Error("sell plans do not accept funding or on-chain prerequisites");
+  const pattern = venue === "polymarket" ? /^polymarket:0x[0-9a-fA-F]{64}$/ : /^predictfun:[0-9]{1,20}$/;
+  if (!pattern.test(order.market)) throw new Error("sell plan market must use a Polymarket condition id or Predict.fun market id");
+  const decimals = SHARE_DECIMALS[venue];
+  if (exactUnits(order.size, decimals) === undefined) throw new Error("sell size must align with the venue share precision");
+  if (exactUnits(mulDecimal(order.price, order.size), decimals) === undefined) {
+    throw new Error("sell size times price must align with the venue collateral precision");
+  }
 }
 
 function checkBps(bps: number): number {
@@ -491,7 +522,62 @@ export function tradePlanAuthorization(plan: TradePlan, chainId: bigint): Eip119
 
 const VENUE_CHAINS: Record<Venue, readonly bigint[]> = { polymarket: [137n], predictfun: [56n], hyperliquid: [42161n, 421614n] };
 const POLYMARKET_EXCHANGES = [CTF_EXCHANGE_V2_LOWER, NEG_RISK_CTF_EXCHANGE_V2_LOWER, CTF_EXCHANGE_V1_LOWER, NEG_RISK_CTF_EXCHANGE_V1_LOWER];
-const SHARE_DECIMALS: Partial<Record<Venue, number>> = { polymarket: 6, predictfun: 18 };
+const SHARE_DECIMALS = { polymarket: 6, predictfun: 18 } as const;
+type SellVenue = keyof typeof SHARE_DECIMALS;
+const PREDICTFUN_USDT = "0x55d398326f99059ff775485246999027b3197955";
+const PREDICTFUN_EXCHANGES = [
+  "0x8bc070bedab741406f4b1eb65a72bee27894b689",
+  "0x365fb81bd4a24d6303cd2f19c349de6894d8d58a",
+  "0x6beb5a40c032afc305961162d8204cda16decfa5",
+  "0x8a289d458f5a134ba40015085a8f50ffb681b41d",
+];
+const UINT256_LIMIT = 1n << 256n;
+const ZERO_BYTES32 = "0x" + "00".repeat(32);
+const EIP712_DOMAIN = [
+  ["name", "string"], ["version", "string"], ["chainId", "uint256"], ["verifyingContract", "address"],
+];
+const ORDER_PREFIX = [["salt", "uint256"], ["maker", "address"], ["signer", "address"]];
+const ORDER_AMOUNTS = [["tokenId", "uint256"], ["makerAmount", "uint256"], ["takerAmount", "uint256"]];
+const ORDER_SIDE = [["side", "uint8"], ["signatureType", "uint8"]];
+const SELL_TYPES = {
+  polymarket: {
+    EIP712Domain: EIP712_DOMAIN,
+    TypedDataSign: [["contents", "Order"], ...EIP712_DOMAIN, ["salt", "bytes32"]],
+    Order: [...ORDER_PREFIX, ...ORDER_AMOUNTS, ...ORDER_SIDE, ["timestamp", "uint256"], ["metadata", "bytes32"], ["builder", "bytes32"]],
+  },
+  predictfun: {
+    EIP712Domain: EIP712_DOMAIN,
+    Order: [
+      ...ORDER_PREFIX, ["taker", "address"], ...ORDER_AMOUNTS,
+      ["expiration", "uint256"], ["nonce", "uint256"], ["feeRateBps", "uint256"], ...ORDER_SIDE,
+    ],
+  },
+};
+function isSellVenue(venue: string): venue is SellVenue {
+  return venue === "polymarket" || venue === "predictfun";
+}
+
+function expectedOutcomeToken(input: TradePlanInput, order: TradePlanOrder, explicit?: string | bigint): bigint | undefined {
+  const venue = order.market.includes(":") ? order.market.split(":")[0].toLowerCase() : "polymarket";
+  if (!isSellVenue(venue)) {
+    if (explicit !== undefined) throw new Error("outcomeTokenId applies only to Polymarket and Predict.fun");
+    return undefined;
+  }
+  const assetId = (value: string | bigint): bigint => {
+    const parsed = uintValue(String(value));
+    if (parsed === undefined || parsed <= 0n || parsed >= UINT256_LIMIT) throw new Error("outcomeTokenId must be a positive uint256");
+    return parsed;
+  };
+  const requested = input.order.outcome.trim().toLowerCase();
+  const market = input.order.market;
+  const outcomes = typeof market === "string" ? undefined : market.outcomes;
+  const tokens = outcomes?.filter((outcome) => [outcome.outcome, outcome.normalized_outcome].some((name) => name?.trim().toLowerCase() === requested))
+    .map((outcome) => assetId(outcome.token_id)) ?? [];
+  const pinned = explicit === undefined ? tokens[0] : assetId(explicit);
+  if (tokens.some((token) => token !== pinned)) throw new Error("outcomeTokenId does not match an unambiguous market outcome");
+  if (outcomes?.length && !tokens.length && explicit === undefined) throw new Error("requested outcome is absent from the market metadata");
+  return pinned;
+}
 // Relay's approval proxy, the only contract a funding permit may pay.
 const RELAY_APPROVAL_PROXY = "0x5567954cd026cebfe486062cb75848e0f1c12e58";
 
@@ -502,8 +588,15 @@ function units(value: string, decimals: number): bigint {
   return frac.length > decimals && /[1-9]/.test(frac.slice(decimals)) ? scaled + 1n : scaled;
 }
 
-/** Refuse a prepared plan that is not what was asked for. Throws before anything is signed. */
-function checkPrepared(plan: TradePlan, body: PrepareBody, opts: RunTradePlanOptions): void {
+function exactUnits(value: string, decimals: number): bigint | undefined {
+  const fraction = value.split(".")[1] ?? "";
+  return /[1-9]/.test(fraction.slice(decimals)) ? undefined : units(value, decimals);
+}
+
+type Refuse = (why: string) => never;
+
+/** Refuse a prepared plan that is not what was asked for. Throws before signing the plan. */
+function checkPrepared(plan: TradePlan, body: PrepareBody, opts: RunTradePlanOptions, tokenId?: bigint): void {
   const refuse = (why: string): never => {
     throw new SafetyCheckError(`refusing to sign trade plan ${plan.id}: ${why}`, plan);
   };
@@ -517,7 +610,7 @@ function checkPrepared(plan: TradePlan, body: PrepareBody, opts: RunTradePlanOpt
   const venue = want.market.includes(":") ? want.market.split(":")[0].toLowerCase() : "polymarket";
   if (plan.venue !== venue) refuse(`venue changed to ${plan.venue}`);
   if (!same(got.market, want.market)) refuse(`market changed to ${got.market}`);
-  if (got.side !== "buy") refuse(`side changed to ${got.side}`);
+  if (got.side !== want.side) refuse(`side changed to ${got.side}`);
   if (got.price !== want.price) refuse(`price changed to ${got.price}`);
   if (got.size !== want.size) refuse(`size changed to ${got.size}`);
   if (got.postOnly !== want.postOnly) refuse("postOnly changed");
@@ -533,11 +626,7 @@ function checkPrepared(plan: TradePlan, body: PrepareBody, opts: RunTradePlanOpt
   if (!(Date.parse(plan.executeBefore) <= Date.parse(plan.tradeSubmitBefore))) refuse("executeBefore is after tradeSubmitBefore");
 
   const b = plan.tradeBudget;
-  const notional = BigInt(b.notionalRaw);
-  const fee = BigInt(b.maxCollateralFeeRaw);
-  const debit = BigInt(b.maxDebitRaw);
-  if (notional <= 0n || notional + fee > debit || b.maxPlatformFeeBps < 0 || b.maxPlatformFeeBps > 1000) refuse("its budget is inconsistent");
-  if (notional > units(String(mulDecimal(got.price, got.size)), b.decimals)) refuse("its notional exceeds price times size");
+  const debit = got.side === "sell" ? checkSellBudget(plan, refuse) : checkBuyBudget(plan, refuse);
   if (opts.maxDebitRaw !== undefined && debit > BigInt(opts.maxDebitRaw)) refuse(`it could debit ${b.maxDebitRaw}, over maxDebitRaw ${String(opts.maxDebitRaw)}`);
 
   const pf = plan.funding;
@@ -572,21 +661,62 @@ function checkPrepared(plan: TradePlan, body: PrepareBody, opts: RunTradePlanOpt
   const consents = plan.requests.filter((r) => r.purpose === "plan");
   const trades = plan.requests.filter((r) => r.purpose === "trade");
   if (consents.length !== 1 || trades.length !== 1) refuse("it needs exactly one plan authorization and one trade");
+  if (got.side === "sell" && (plan.requests.length !== 2 || plan.requests.some((request) => request.kind !== "signature"))) {
+    refuse("a sell needs only the plan authorization and trade signatures");
+  }
   const tradeChain = uintValue(trades[0].chainId);
   if (tradeChain === undefined || !VENUE_CHAINS[plan.venue]?.includes(tradeChain)) refuse("the trade signs on another chain");
   if (uintValue(consents[0].chainId) !== tradeChain) refuse("the plan authorization signs on another chain");
   if (!sameRequest(consents[0].request, tradePlanAuthorization(plan, tradeChain!))) refuse("its authorization does not name this plan");
-  checkTrade(plan, typedDoc(trades[0].request)!, refuse);
+  checkTrade(plan, typedDoc(trades[0].request)!, refuse, tokenId);
   for (const req of plan.requests.filter((r) => r.purpose === "funding")) {
     if (!pf) refuse("it asks for a funding signature without funding");
     checkFunding(plan, req, refuse);
   }
 }
 
-/** The venue order the trade request signs must be this plan's buy. */
-function checkTrade(plan: TradePlan, doc: TypedDoc, refuse: (why: string) => never): void {
+function checkBuyBudget(plan: TradePlan, refuse: Refuse): bigint {
+  const b = plan.tradeBudget;
+  const notional = BigInt(b.notionalRaw);
+  const fee = BigInt(b.maxCollateralFeeRaw);
+  const debit = BigInt(b.maxDebitRaw);
+  if (b.minProceedsRaw != null || notional <= 0n || notional + fee > debit || b.maxPlatformFeeBps < 0 || b.maxPlatformFeeBps > 1000) {
+    refuse("its budget is inconsistent");
+  }
+  if (notional > units(mulDecimal(plan.order.price, plan.order.size), b.decimals)) refuse("its notional exceeds price times size");
+  return debit;
+}
+
+function checkSellBudget(plan: TradePlan, refuse: Refuse): bigint {
+  const { order, tradeBudget: b, venue } = plan;
+  if (!isSellVenue(venue)) return refuse("its venue does not support sell plans");
+  const decimals = SHARE_DECIMALS[venue];
+  const chainId = venue === "polymarket" ? "137" : "56";
+  const collateral = venue === "polymarket" ? PUSD_LOWER : PREDICTFUN_USDT;
+  const notional = exactUnits(order.size, decimals);
+  const proceeds = exactUnits(mulDecimal(order.price, order.size), decimals);
+  if (b?.collateral?.kind !== "evm" || b.collateral.chainId !== chainId || !sameHex(b.collateral.token, collateral) || b.decimals !== decimals) {
+    return refuse("its sell collateral is inconsistent with the venue");
+  }
+  if (notional === undefined || proceeds === undefined || proceeds <= 0n || notional >= UINT256_LIMIT ||
+    b.notionalRaw !== String(notional) || b.minProceedsRaw !== String(proceeds) || b.maxDebitRaw !== "0" ||
+    !Number.isInteger(b.maxPlatformFeeBps) || b.maxPlatformFeeBps < 0 || b.maxPlatformFeeBps > 1000) {
+    return refuse("its sell budget is inconsistent");
+  }
+  const partnerFee = b.partnerFee?.maxBps;
+  if (partnerFee !== undefined && (!Number.isInteger(partnerFee) || partnerFee < 0 || partnerFee > b.maxPlatformFeeBps)) {
+    refuse("its partner fee exceeds the platform fee ceiling");
+  }
+  const maxFee = (notional * BigInt(b.maxPlatformFeeBps) + 9999n) / 10000n;
+  if (b.maxCollateralFeeRaw !== String(maxFee)) refuse("its sell fee does not match the signed ceiling");
+  return 0n;
+}
+
+/** The venue order the trade request signs must be this plan's order. */
+function checkTrade(plan: TradePlan, doc: TypedDoc, refuse: Refuse, tokenId?: bigint): void {
   const o = plan.order;
   const m = doc.message ?? {};
+  if (o.side === "sell") return checkSellTrade(plan, doc, refuse, tokenId);
   if (plan.venue === "hyperliquid") {
     const ok =
       doc.primaryType === "PlaceOrder" &&
@@ -607,9 +737,10 @@ function checkTrade(plan: TradePlan, doc: TypedDoc, refuse: (why: string) => nev
   }
   const order = (plan.venue === "polymarket" ? m.contents : m) as Record<string, unknown> | undefined;
   const makers = plan.venue === "polymarket" ? [plan.tradingWallet] : [plan.wallet, plan.tradingWallet];
-  const wrapped =
-    plan.venue !== "polymarket" ||
-    (doc.primaryType === "TypedDataSign" && m.name === "DepositWallet" && uintValue(m.chainId) === 137n && sameHex(m.verifyingContract, plan.tradingWallet) && POLYMARKET_EXCHANGES.includes(String(doc.domain?.verifyingContract).toLowerCase()));
+  const exchange = String(doc.domain?.verifyingContract).toLowerCase();
+  const isPolymarketExchange = POLYMARKET_EXCHANGES.includes(exchange) || (exchange === EXCHANGE_V3_LOWER && doc.domain?.version === "3");
+  const wrapped = plan.venue !== "polymarket" ||
+    (doc.primaryType === "TypedDataSign" && m.name === "DepositWallet" && uintValue(m.chainId) === 137n && sameHex(m.verifyingContract, plan.tradingWallet) && isPolymarketExchange);
   const ok =
     wrapped &&
     (plan.venue === "polymarket" || doc.primaryType === "Order") &&
@@ -617,11 +748,53 @@ function checkTrade(plan: TradePlan, doc: TypedDoc, refuse: (why: string) => nev
     makers.some((a) => sameHex(order.maker, a)) &&
     [plan.wallet, plan.tradingWallet].some((a) => sameHex(order.signer, a)) &&
     uintValue(order.side) === 0n &&
-    uintValue(order.takerAmount) === units(o.size, SHARE_DECIMALS[plan.venue]!) &&
+    (tokenId === undefined || uintValue(order.tokenId) === tokenId) &&
+    uintValue(order.takerAmount) === units(o.size, SHARE_DECIMALS[plan.venue]) &&
     uintValue(order.makerAmount) === BigInt(plan.tradeBudget.notionalRaw) &&
     (order.taker === undefined || uintValue(order.taker) === 0n) &&
     (!o.expiresAt || order.expiration === undefined || uintValue(order.expiration) === BigInt(unixSeconds(o.expiresAt)));
   if (!ok) refuse("the trade signs a different order");
+}
+
+function checkSellTrade(plan: TradePlan, doc: TypedDoc, refuse: Refuse, expectedToken?: bigint): void {
+  const { order: o, tradeBudget: b, venue } = plan;
+  if (!isSellVenue(venue)) return refuse("its venue does not support sell plans");
+  const expectedTypes = Object.fromEntries(Object.entries(SELL_TYPES[venue]).map(([name, fields]) => [
+    name, fields.map(([name, type]) => ({ name, type })),
+  ]));
+  if (!doc.types || canonicalJson(doc.types) !== canonicalJson(expectedTypes)) refuse("the sell uses an unexpected signed order structure");
+  const m = doc.message ?? {};
+  const domain = doc.domain ?? {};
+  const exchange = String(domain.verifyingContract).toLowerCase();
+  const order = (venue === "polymarket" ? m.contents : m) as Record<string, unknown> | undefined;
+  if (!order) return refuse("the sell has no signed order");
+  const asset = uintValue(order.tokenId);
+  const owner = venue === "polymarket" ? plan.tradingWallet : plan.wallet;
+  if (asset === undefined || asset <= 0n || asset >= UINT256_LIMIT || (expectedToken !== undefined && asset !== expectedToken) ||
+    !sameHex(order.maker, owner) || !sameHex(order.signer, owner) || uintValue(order.side) !== 1n ||
+    uintValue(order.makerAmount) !== BigInt(b.notionalRaw) || uintValue(order.takerAmount) !== BigInt(b.minProceedsRaw!)) {
+    refuse("the trade signs a different sell order or outcome token");
+  }
+
+  if (venue === "polymarket") {
+    const knownExchange = domain.version === "3" ? exchange === EXCHANGE_V3_LOWER :
+      domain.version === "2" && (exchange === CTF_EXCHANGE_V2_LOWER || exchange === NEG_RISK_CTF_EXCHANGE_V2_LOWER);
+    if (doc.primaryType !== "TypedDataSign" || domain.name !== "Polymarket CTF Exchange" || !knownExchange ||
+      m.name !== "DepositWallet" || m.version !== "1" || uintValue(m.chainId) !== 137n ||
+      !sameHex(m.verifyingContract, owner) || !sameHex(m.salt, ZERO_BYTES32) || uintValue(order.signatureType) !== 3n) {
+      refuse("the sell does not authorize this Polymarket deposit wallet and exchange");
+    }
+    return;
+  }
+
+  const fee = uintValue(order.feeRateBps);
+  const expiration = uintValue(order.expiration);
+  if (doc.primaryType !== "Order" || domain.name !== "predict.fun CTF Exchange" || domain.version !== "1" ||
+    !PREDICTFUN_EXCHANGES.includes(exchange) || uintValue(order.signatureType) !== 0n || uintValue(order.taker) !== 0n ||
+    !sameHex(plan.tradingWallet, plan.wallet) || fee === undefined || fee > 10000n || expiration === undefined ||
+    (o.expiresAt !== undefined && expiration !== uintValue(unixSeconds(o.expiresAt)))) {
+    refuse("the sell does not authorize this Predict.fun wallet and exchange");
+  }
 }
 
 /** A funding signature may move only the quoted amount of the source token, from the wallet, to the bridge. */

@@ -1,5 +1,7 @@
 // Shared HTTP transport: JSON in, JSON out, one error type.
 
+export type HttpMethod = "GET" | "POST" | "DELETE" | "PATCH" | "PUT";
+
 export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 
 /** Server codes meaning a request may have taken effect even though it did not answer cleanly. */
@@ -75,7 +77,12 @@ export class Http {
     this.fetchImpl = opts.fetch ?? ((input, init) => fetch(input, init));
   }
 
-  async request<T>(method: "GET" | "POST", path: string, opts: RequestOptions = {}): Promise<T> {
+  async request<T>(method: HttpMethod, path: string, opts: RequestOptions = {}): Promise<T> {
+    return await readBody(await this.requestResponse(method, path, opts)) as T;
+  }
+
+  /** For binary responses and response headers. Non-2xx responses still throw KairosError. */
+  async requestResponse(method: HttpMethod, path: string, opts: RequestOptions = {}): Promise<Response> {
     opts.signal?.throwIfAborted();
     const url = this.baseUrl + path + queryString(opts.query);
     const headers: Record<string, string> = { accept: "application/json", ...this.headers, ...opts.headers };
@@ -86,17 +93,11 @@ export class Http {
       body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
       signal: opts.signal,
     });
-    const text = await res.text();
-    let json: unknown = undefined;
-    if (text) {
-      try {
-        json = JSON.parse(text);
-      } catch {
-        json = text;
-      }
+    if (!res.ok) {
+      const body = await readBody(res);
+      throw httpError(res.status, errorMessage(body) ?? `${method} ${path} failed with ${res.status}`, body);
     }
-    if (!res.ok) throw httpError(res.status, errorMessage(json) ?? `${method} ${path} failed with ${res.status}`, json);
-    return json as T;
+    return res;
   }
 
   get<T>(path: string, query?: Query, headers?: Record<string, string>, signal?: AbortSignal): Promise<T> {
@@ -108,7 +109,8 @@ export class Http {
   }
 }
 
-export type Query = Record<string, string | number | boolean | undefined | null>;
+type QueryValue = string | number | boolean;
+export type Query = Record<string, QueryValue | readonly QueryValue[] | undefined | null>;
 
 function httpError(status: number, message: string, body: unknown): KairosError {
   if (bodyCode(body) === "FEE_SETTLEMENT_REQUIRED") return new FeeSettlementRequiredError(status, message, body as Record<string, unknown>);
@@ -119,7 +121,11 @@ function queryString(query?: Query): string {
   if (!query) return "";
   const params = new URLSearchParams();
   for (const [key, value] of Object.entries(query)) {
-    if (value !== undefined && value !== null) params.set(key, String(value));
+    if (Array.isArray(value)) {
+      for (const item of value) params.append(key, String(item));
+    } else if (value !== undefined && value !== null) {
+      params.set(key, String(value));
+    }
   }
   const s = params.toString();
   return s ? `?${s}` : "";
@@ -146,4 +152,14 @@ function errorMessage(body: unknown): string | undefined {
   // Request-shape rejections come back as plain text.
   if (typeof body === "string" && body.trim()) return body.trim().slice(0, 500);
   return undefined;
+}
+
+async function readBody(response: Response): Promise<unknown> {
+  const body = await response.text();
+  if (!body) return undefined;
+  try {
+    return JSON.parse(body);
+  } catch {
+    return body;
+  }
 }
