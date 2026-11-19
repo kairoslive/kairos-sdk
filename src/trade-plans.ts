@@ -520,6 +520,7 @@ export function tradePlanAuthorization(plan: TradePlan, chainId: bigint): Eip119
   });
 }
 
+const PLAN_PURPOSES = new Set(["plan", "trade", "funding"]);
 const VENUE_CHAINS: Record<Venue, readonly bigint[]> = { polymarket: [137n], predictfun: [56n], hyperliquid: [42161n, 421614n] };
 const POLYMARKET_EXCHANGES = [CTF_EXCHANGE_V2_LOWER, NEG_RISK_CTF_EXCHANGE_V2_LOWER, CTF_EXCHANGE_V1_LOWER, NEG_RISK_CTF_EXCHANGE_V1_LOWER];
 const SHARE_DECIMALS = { polymarket: 6, predictfun: 18 } as const;
@@ -643,6 +644,8 @@ function checkPrepared(plan: TradePlan, body: PrepareBody, opts: RunTradePlanOpt
 
   // Every request is bound into planHash and the plan authorization; recompute both rather than trust them.
   for (const req of plan.requests) {
+    // Only the kinds checked below are ever signed: anything else could be an unrelated permit.
+    if (req.kind !== "signature" || !PLAN_PURPOSES.has(req.purpose)) refuse(`request ${req.id} has unexpected purpose ${String(req.purpose)}`);
     const signer = req.request.method === "personal_sign" ? req.request.params[1] : req.request.params[0];
     if (!same(req.signer, body.wallet) || !same(String(signer ?? ""), body.wallet)) refuse(`request ${req.id} is for another signer`);
     if (req.externalSubmission) refuse(`request ${req.id} is client-submitted`);

@@ -238,6 +238,15 @@ test("tradePlans.run: refuses, before signing, a plan whose order was rewritten"
   const tampered: [string, (p: TradePlan) => void][] = [
     ["authorization names another plan", (p) => rehash(Object.assign(p.requests[0], { request: tradePlanAuthorization({ ...p, id: "other" }, 137n) }))],
     ["authorization on another chain", (p) => rehash(Object.assign(p.requests[0], { request: tradePlanAuthorization(p, 1n) }))],
+    [
+      "an extra request with an unknown purpose",
+      (p) => {
+        const trade = p.requests.find((r) => r.purpose === "trade")!;
+        const permit = { types: {}, primaryType: "Permit", domain: { name: "USD Coin", version: "2", chainId: 137, verifyingContract: "0x" + "3c".repeat(20) }, message: { owner: W, spender: "0x" + "66".repeat(20), value: "1000000000", nonce: "0", deadline: "9999999999" } };
+        p.requests.push({ ...trade, id: "extra", purpose: "permit" as never, request: typedDataRequest(W, permit) });
+        seal(p);
+      },
+    ],
     ["planHash", (p) => (p.planHash = HASH)],
     ["requestHash", (p) => (p.requests[1].requestHash = HASH)],
     ["trade swapped after sealing", (p) => rehash(Object.assign(p.requests[1], { request: typedDataRequest(W, { ...tradeDoc(p), primaryType: "Other" }) }))],
