@@ -188,7 +188,7 @@ test(`[${environment}] order path: rest a post-only limit far from the market, t
  * Cancels by client order id and reads the order back until a read shows it final. Ten attempts, 2 s apart, with a
  * cancel on attempts 1, 4, 7 and 10; each request has the suite's 20 s timeout. Only a read decides the status, and a
  * `null` read (not visible yet, e.g. after a timed-out placement) keeps retrying. Returns the last status read:
- * an order status, `absent` (never seen) or `unreadable`.
+ * an order status, `absent` (the last successful read returned `null`) or `unreadable`.
  */
 async function cleanUp(clientOrderId: string): Promise<string> {
   const final = new Set(["cancelled", "filled", "expired", "rejected"]);
