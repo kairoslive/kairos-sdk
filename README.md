@@ -1,6 +1,6 @@
 # Kairos SDK
 
-One TypeScript package for Kairos market data, Discover, streaming, trading, self-custody wallets, and external signing. No runtime dependencies, works in browsers and Node 20+.
+One TypeScript package for Kairos market data, Discover, streaming, trading, perps, self-custody wallets, and external signing. No runtime dependencies, works in browsers and Node 20+.
 
 ```bash
 npm install @kairos.trade/sdk
@@ -84,6 +84,112 @@ const quote = await kairos.execution.routeQuote({ ...ref, side: 'yes', quantity:
 ```
 
 `execution` also exposes route fee checks, linked-market preview/confirmation, routed close, and combo quote, buy, cash-out and redeem. `data.request`, `markets.request` and `execution.request` accept the paths, methods and inputs from their published OpenAPI specs and infer JSON responses. Use `.response` for response headers or binary bodies.
+
+## Perps
+
+Hyperliquid perps, Polymarket Perps and Kalshi Margin from one client. `kairos.perps.markets` is public market data. The rest is your account and needs an API key: `trade:read` for reads, `trade:execute` for orders, cancels, cancel-all and reconcile. API keys cannot move funds, so the SDK has no deposit or withdrawal calls.
+
+**Hosts.** Perps defaults to **staging** (`PERPS_HOSTS.staging`): `staging-execution`, `staging-md` and `staging-data.kairos.trade`. Production serves only place, list and cancel orders, cancel-all, positions and reconcile today; the other `/perps/*` routes answer 404 there. For production, pass `environment: 'production'`. You can also override any one host with `executionUrl`, `marketDataUrl` or `dataUrl`. **The staging executor routes orders to live venues with real funds.**
+
+```ts
+import { createKairos, newClientOrderId } from '@kairos.trade/sdk'
+
+const kairos = createKairos({
+  perps: { auth: { apiKey: { clientId, apiKey, apiSecret } } }, // server-side only
+  // perps: { environment: 'production', auth: … }
+})
+const perps = kairos.perps
+
+// 1. Margin and balance (venue collateral: USDC, pUSD, USD). Null until the venue has reported one.
+const margin = await perps.account('hyperliquid_perps')
+// { equity, available, withdrawable, initial_margin, maintenance_margin, risk, observed_at }
+
+// 2. Funding: the current rate per interval (positive = longs pay), and what you were paid or charged.
+const funding = await perps.markets.currentFunding('hyperliquid_perps', 'BTC')
+// { funding_rate: '0.0000125', next_funding_time_ns, mark, source: 'snapshot' | 'stored_state' }
+const payments = await perps.fundingPayments({ limit: 50 }) // Hyperliquid only
+
+// 3. Positions and working orders
+const positions = await perps.positions() // every venue; or { venue, account }
+const working = await perps.orders('kalshi_margin')
+
+// 4. Place a resting limit far from the market, then cancel it by your id
+const [rules] = await perps.instrumentRules('hyperliquid_perps', { instrument: 'BTC' })
+const { book } = await perps.markets.snapshot('hyperliquid_perps', 'BTC', { depth: 1 })
+const clientOrderId = newClientOrderId() // 32 lowercase hex: valid on every venue
+const order = await perps.placeOrder({
+  venue: 'hyperliquid_perps', instrument: 'BTC', client_order_id: clientOrderId,
+  side: 'buy', kind: 'limit', tif: 'gtc', post_only: true,
+  price: String(Math.floor(Number(book.bids[0].price) / 2)), // whole-dollar price, half the bid
+  quantity: '0.0004', // ≥ rules.min_notional, a multiple of rules.size_step
+})
+await perps.order('hyperliquid_perps', clientOrderId) // exact lookup; null if Kairos has none
+await perps.cancelOrder('hyperliquid_perps', clientOrderId)
+
+// 5. Reconcile Kairos' stored state with the venue (after a disconnect, or an outcome-unknown error)
+await perps.reconcile('hyperliquid_perps')
+```
+
+**Venues and ids.** Orders use the execution venue and the venue-native instrument. Market data uses either the Kairos instrument id or the venue symbol. `markets.instruments()` gives both: `instrument_id` and `execution_venue` / `execution_instrument_id`.
+
+| `venue` | `account` | `instrument` in orders | Quantity unit | Collateral |
+| --- | --- | --- | --- | --- |
+| `hyperliquid_perps` (market data: `hyperliquid`, alias accepted) | `"0"` = connected wallet | main-dex coin, `BTC` | base asset | USDC |
+| `polymarket_perps` | `"0"` or a lowercase `0x` wallet | numeric iid, `"1"` | contracts | pUSD |
+| `kalshi_margin` | subaccount `"0"`–`"63"` (`kalshiAccounts()`) | ticker, `KXBTCPERP` | contracts | USD |
+
+Every price, size and amount is an exact decimal string, in the instrument's quote per native unit. Market-data history rows use `{coefficient, scale}`; format one with `exactDecimal()`. A market order still carries `price`: your worst acceptable price.
+
+**Orders.** `placeOrder` sends the body `POST /perps/orders` takes: `venue`, `instrument`, `client_order_id`, `side` (`buy`/`sell`), `kind` (`limit`/`market`), `tif` (`gtc`, `ioc`, `fok`, `gtd` with `expires_at`, `fak`), `price`, `quantity`, and optionally `account`, `post_only`, `reduce_only`, `close_position`, `trigger` (`take_profit`/`stop_loss`) with `trigger_price`, `leverage` and `margin_mode` (Hyperliquid and Polymarket only), and `bracket` (an opening Polymarket limit). `client_order_id` is the idempotency key: resend the same body with the same id after a timeout. Reusing an id with a different body is `409 CLIENT_ORDER_ID_CONFLICT`. Venue rules differ (Hyperliquid has no market FOK; Kalshi reduce-only needs IOC/FOK/FAK). See [the perps trading guide](https://github.com/kairoslive/kairos/blob/staging/docs/perpetuals/authenticated-api.md).
+
+### Perps reference
+
+Execution (`kairos.perps`, Order Execution API, API key):
+
+| Method | Endpoint | Returns |
+| --- | --- | --- |
+| `account(venue, { account? })` | `GET /perps/account` | `PerpAccount \| null`: margin, balance, `risk` |
+| `positions({ venue?, account? })` | `GET /perps/positions` | `PerpPosition[]`: signed `quantity`, `entry_price`, `liquidation_price`, `realized_pnl`, `fees`, `funding` |
+| `orders(venue)` | `GET /perps/orders` | working `PerpOrder[]` |
+| `order(venue, clientOrderId)` | `GET /perps/orders/{client_order_id}` | `PerpOrder \| null` |
+| `fills(venue, { limit? })` | `GET /perps/fills` | newest `PerpFill[]` (1–500, default 100) |
+| `fillHistory` / `allFills(venue)` | `GET /perps/history/fills` | `{ items, next_cursor, complete }`, newest first; `all*` follows the cursor |
+| `orderHistory` / `allOrders(venue)` | `GET /perps/history/orders` | same, orders in any state |
+| `fundingPayments` / `allFundingPayments({ account?, scope? })` | `GET /perps/history/funding` | Hyperliquid funding payments, `amount` in USDC |
+| `instrumentRules(venue, { instrument? })` | `GET /perps/instruments` | tick or price decimals, `size_step`, minimums, `max_leverage` (Kalshi needs `instrument`) |
+| `leverage(venue, instrument, { account? })` | `GET /perps/leverage` | `{ leverage, margin_mode, max_leverage }` |
+| `kalshiAccounts()` | `GET /perps/kalshi/accounts` | Kalshi subaccount numbers |
+| `placeOrder(order)` | `POST /perps/orders` | the `PerpOrder` |
+| `cancelOrder(venue, clientOrderId, { account? })` | `DELETE /perps/orders/{client_order_id}` | the `PerpOrder` |
+| `cancelAll(venue, { account? })` | `POST /perps/orders/cancel-all` | `{ requested: true }`: accepted, not done |
+| `reconcile(venue, { account? })` | `POST /perps/reconcile` | `{ reconciled: true }` |
+
+Market data (`kairos.perps.markets`, public; a key raises the rate budget):
+
+| Method | Endpoint | Returns |
+| --- | --- | --- |
+| `venues()` | Data API `GET /perpetuals/venues` | each venue's capabilities |
+| `instruments({ venue? })` | Data API `GET /perpetuals/instruments` | `PerpInstrument[]` (not paged) |
+| `snapshot(venue, instrument, { depth? })` | `GET /v1/perpetuals/{venue}/{instrument}/snapshot` | venue-live book and market state; 6 heavy units |
+| `currentFunding(venue, instrument)` | snapshot, then `/state` if the snapshot has no rate | `PerpCurrentFunding` |
+| `funding` / `allFunding` | `GET …/funding` | stored funding rates |
+| `trades` / `allTrades` | `GET …/trades` | stored public trades (≤ 7 days per range) |
+| `candles` / `allCandles(…, { interval?, kind? })` | `GET …/candles` | `1m`…`1d`, trade or mark candles |
+| `state` / `allState` | `GET …/state` | stored mark, oracle, funding, open interest (≤ 7 days) |
+| `liquidations` / `allLiquidations` | `GET …/liquidations` | stored public liquidations (only Hyperliquid flags them) |
+
+History takes `{ from?, to?, limit?, cursor? }`. `from` and `to` are a `Date`, unix ms or RFC 3339; `limit` is 1–5000, default 1000. Rows ascend by event time in `[from, to)`, and the `all*` iterators pin `to` so every page shares one range.
+
+**Errors.** Failures throw `KairosError`:
+
+- `status` is the HTTP status.
+- `code` is the top-level code: a `PERP_*` rejection such as `PERP_PRICE_OFF_GRID`, or `RATE_LIMITED`, `AUTH_INSUFFICIENT_SCOPE`, `AUTH_CREDENTIALS_NOT_FOUND`, `CLIENT_ORDER_ID_CONFLICT`, `PERP_UNAVAILABLE` or `MARKET_PAUSED`. Market data sends `rate_limited`, `invalid_request` or `not_found`.
+- `body` is `PerpErrorBody`. Its `error_details.code` is the stable class, for example `VALIDATION_INVALID_ORDER`.
+- `isPerpError(err, code)` matches either code.
+- `outcomeUnknown` is true for `500`, `502`, `504`, `408` or `PERP_OUTCOME_UNKNOWN`. The order may be live: check `order()` before you retry. A `503` was refused before it reached the venue.
+- `all*` iterators throw `PerpHistoryIncompleteError` (with `cursor`) when the server could not read older rows.
+
+Not in the SDK yet: leverage updates, Kalshi venue-native brackets, Krisis brackets, the perps WebSocket push, and the browser-session-only funding and onboarding routes.
 
 ## Partner webhooks
 
@@ -280,7 +386,11 @@ pnpm typecheck
 pnpm build         # dist/ (ESM + .d.ts)
 pnpm generate:openapi
 pnpm generate:stream
+node scripts/generate-perps-openapi.mjs file:///path/to/kairos/docs/api/   # perps paths only, from a kairos checkout
+KAIROS_SDK_LIVE=1 pnpm test:live:perps   # perps on staging, read-only
 ```
+
+The perps live suite is skipped unless `KAIROS_SDK_LIVE=1`. It reads discovery, books, current funding and history on all three venues. With a key it also reads margin, positions, orders, fills, rules and leverage. The key comes from `KAIROS_CLIENT_ID`, `KAIROS_API_KEY` and `KAIROS_API_SECRET`, or from `KAIROS_SDK_CREDENTIALS_FILE`, a JSON file holding `client_id`, `api_key` and `api_secret`. A second opt-in, `KAIROS_SDK_LIVE_ORDERS=1` (staging only, needs `trade:execute`), places one post-only Hyperliquid BTC buy at half the best bid, then cancels it by client order id. If the order is refused with `403` or `503`, it skips once and does not retry.
 
 The live suite covers market data, Discover, WebSocket frames, trader positions, and the Trading API credential requirement. Set `KAIROS_PARTNER_ID` to also check wallet status and the setup prerequisite with an unfunded test address. Live checks never sign or submit an order. Use Node 22+ to include WebSocket checks. Set `KAIROS_TRADER_WALLET` to check a specific wallet and use `KAIROS_MARKET_DATA_URL`, `KAIROS_DATA_URL`, `KAIROS_EXECUTION_URL` or `KAIROS_STREAM_URL` to override individual hosts.
 

@@ -1,10 +1,19 @@
 # Changelog
 
-## Unreleased
+## 0.6.0
 
 ### Added
 
+- `kairos.perps` (`PerpsClient`): Hyperliquid perps, Polymarket Perps and Kalshi Margin over the Order Execution API with an API key. Reads: `account` (margin and balance), `positions`, `orders`, `order` (by client order id), `fills`, `fillHistory`, `orderHistory`, `fundingPayments`, `instrumentRules`, `leverage` and `kalshiAccounts`; `allFills`, `allOrders` and `allFundingPayments` follow the cursor. Writes: `placeOrder`, `cancelOrder`, `cancelAll` and `reconcile`. Hosts default to staging (`PERPS_HOSTS`); pass `environment: 'production'` or individual URLs.
+- `kairos.perps.markets` (`PerpsMarketsClient`), public: `venues`, `instruments`, `snapshot`, `currentFunding`, and stored `funding`, `trades`, `candles`, `state` and `liquidations` with `all*` iterators that pin the range across pages.
+- `newClientOrderId()`, `exactDecimal()`, `isPerpError()`, `PerpHistoryIncompleteError`, and the `Perp*` types. They are generated from the perps paths of Kairos' OpenAPI specs by `scripts/generate-perps-openapi.mjs`. Where a handler differs from the spec, the type follows the handler: order flags and `account` are optional, positions carry `leverage`, `margin_mode` and `isolated_margin`, and `/perps/instruments` and `/perps/leverage` are typed by hand.
+- `pnpm test:live:perps`: an opt-in live suite (`KAIROS_SDK_LIVE=1`), read-only unless `KAIROS_SDK_LIVE_ORDERS=1` is also set.
 - `kairos.wallet.comboQuote`, `kairos.wallet.combo` and `kairos.wallet.combos`: quote, buy and cash out Polymarket combos (parlays) with the wallet's own signature, and list the trading wallet's combos. A quote that lapses before the signature is refreshed under the same limits and signed again. Redeem a won combo with `kairos.wallet.onchain.redeem(wallet, combo.market, sharesRaw, { outcome: 0 })`. Adds `ComboInput`, `ComboResult`, `WalletCombo`, the `combo` and `comboQuote` actions, and the error codes `NO_QUOTES`, `SIZE_TOO_LARGE` and `PRICE_LIMIT`.
+
+### Changed
+
+- `KairosError.code` also reads the Market Data API's nested `error.code` (for example `rate_limited`).
+- `KairosError.outcomeUnknown` is also true for `PERP_OUTCOME_UNKNOWN`.
 
 ## 0.5.0
 

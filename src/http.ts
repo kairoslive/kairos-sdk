@@ -5,13 +5,13 @@ export type HttpMethod = "GET" | "POST" | "DELETE" | "PATCH" | "PUT";
 export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 
 /** Server codes meaning a request may have taken effect even though it did not answer cleanly. */
-const UNKNOWN_CODES = new Set(["ORDER_OUTCOME_UNKNOWN", "CANCEL_OUTCOME_UNKNOWN"]);
+const UNKNOWN_CODES = new Set(["ORDER_OUTCOME_UNKNOWN", "CANCEL_OUTCOME_UNKNOWN", "PERP_OUTCOME_UNKNOWN"]);
 
 /** A non-2xx response. `status` is the HTTP status; `body` is the parsed JSON, or the raw text when it is not JSON. */
 export class KairosError extends Error {
   readonly status: number;
   readonly body: unknown;
-  /** The machine-readable code from the body (`code` or `errorCode`), when the server sent one. */
+  /** The machine-readable code from the body (`code`, `errorCode` or `error.code`), when the server sent one. */
   readonly code: string | undefined;
 
   constructor(status: number, message: string, body: unknown) {
@@ -24,8 +24,8 @@ export class KairosError extends Error {
 
   /**
    * True when the request may still have taken effect, so an order or cancel may be live: check open orders before retrying.
-   * That is a `500`, `502`, `504` or `408` (the server stopped answering mid-request), or a body coded `ORDER_OUTCOME_UNKNOWN`
-   * or `CANCEL_OUTCOME_UNKNOWN`. A `503` is false: it means the request was refused before reaching a venue.
+   * That is a `500`, `502`, `504` or `408` (the server stopped answering mid-request), or a body coded `ORDER_OUTCOME_UNKNOWN`,
+   * `CANCEL_OUTCOME_UNKNOWN` or `PERP_OUTCOME_UNKNOWN`. A `503` is false: it means the request was refused before reaching a venue.
    */
   get outcomeUnknown(): boolean {
     if (this.code && UNKNOWN_CODES.has(this.code)) return true;
@@ -136,6 +136,10 @@ function bodyCode(body: unknown): string | undefined {
   const b = body as Record<string, unknown>;
   if (typeof b.code === "string") return b.code;
   if (typeof b.errorCode === "string") return b.errorCode;
+  // Market Data API: {"error": {"code": "rate_limited", "message": "…"}}.
+  if (b.error && typeof b.error === "object" && typeof (b.error as Record<string, unknown>).code === "string") {
+    return (b.error as Record<string, unknown>).code as string;
+  }
   return undefined;
 }
 

@@ -9,6 +9,7 @@ import { MarketDataClient, type MarketDataOptions } from "./markets.ts";
 import { TraderClient } from "./traders.ts";
 import { WalletClient, type WalletClientOptions } from "./wallets.ts";
 import type { FetchLike } from "./http.ts";
+import { PerpsClient, type PerpsOptions } from "./perps.ts";
 
 export interface KairosOptions {
   /** Market data base URL. Default `https://md.kairos.trade`. */
@@ -23,6 +24,8 @@ export interface KairosOptions {
   execution?: Omit<RestOptions, "fetch">;
   /** Wallet API: your Kairos base URL, partner id (or API key, server-side) and the wallet's EIP-1193 provider. */
   wallet?: Omit<WalletClientOptions, "fetch">;
+  /** Perps: API key and hosts. Defaults to the staging hosts (see `PERPS_HOSTS`); pass `environment: "production"` for prod. */
+  perps?: Omit<PerpsOptions, "fetch">;
   fetch?: FetchLike;
 }
 
@@ -35,6 +38,8 @@ export interface Kairos {
   traders: TraderClient;
   /** Present when `wallet` options were passed. Also `wallet.fees`, `wallet.tradePlans` and `wallet.onchain` (preview). */
   wallet: WalletClient;
+  /** Hyperliquid perps, Polymarket Perps and Kalshi Margin. `perps.markets` is public; the rest needs `perps.auth`. */
+  perps: PerpsClient;
 }
 
 /** Build a client. `markets` and `traders` always work; `wallet` needs `wallet` options. */
@@ -45,12 +50,14 @@ export function createKairos(opts: KairosOptions = {}): Kairos {
   const execution = new ExecutionClient({ ...opts.execution, fetch: opts.fetch });
   const traders = new TraderClient({ baseUrl: dataUrl, fetch: opts.fetch });
   const wallet = opts.wallet ? new WalletClient({ ...opts.wallet, fetch: opts.fetch }) : undefined;
+  const perps = new PerpsClient({ ...opts.perps, fetch: opts.fetch });
   return {
     markets,
     data,
     execution,
     stream: (options) => new MarketStream(options),
     traders,
+    perps,
     get wallet(): WalletClient {
       if (!wallet) throw new Error("pass `wallet: { baseUrl, partnerId, provider }` (or `apiKey` instead of `partnerId`) to createKairos to use the wallet API");
       return wallet;
@@ -214,6 +221,58 @@ export {
   type MarketStreamSubscription,
   type MarketStreamTopic,
 } from "./stream.ts";
+
+export {
+  PerpsClient,
+  PerpsMarketsClient,
+  PerpHistoryIncompleteError,
+  PERPS_HOSTS,
+  exactDecimal,
+  isPerpError,
+  newClientOrderId,
+  type PerpAccount,
+  type PerpAccountQuery,
+  type PerpCandle,
+  type PerpCandleRange,
+  type PerpCurrentFunding,
+  type PerpErrorBody,
+  type PerpExactDecimal,
+  type PerpFill,
+  type PerpFillPage,
+  type PerpFundingPayment,
+  type PerpFundingPaymentsPage,
+  type PerpFundingPaymentsQuery,
+  type PerpFundingRate,
+  type PerpHistoryPage,
+  type PerpHistoryRange,
+  type PerpInstrument,
+  type PerpInstrumentRules,
+  type PerpLeverage,
+  type PerpLiquidation,
+  type PerpMarginMode,
+  type PerpMarketState,
+  type PerpMarketVenue,
+  type PerpOrder,
+  type PerpOrderInput,
+  type PerpOrderKind,
+  type PerpOrderPage,
+  type PerpOrderStatus,
+  type PerpPageQuery,
+  type PerpPosition,
+  type PerpSide,
+  type PerpSnapshot,
+  type PerpStateUpdate,
+  type PerpTimeInForce,
+  type PerpTrade,
+  type PerpTrigger,
+  type PerpVenue,
+  type PerpVenueInfo,
+  type PerpsDataPaths,
+  type PerpsEnvironment,
+  type PerpsExecutionPaths,
+  type PerpsMarketDataPaths,
+  type PerpsOptions,
+} from "./perps.ts";
 
 export { DataClient, type DiscoverQuery } from "./data.ts";
 export { ExecutionClient, EXECUTION_URL, type RouteQuoteQuery, type RouteBuyInput, type RouteCloseInput, type RouteLinkInput } from "./execution.ts";
