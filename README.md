@@ -130,7 +130,7 @@ await perps.cancelOrder('hyperliquid_perps', clientOrderId)
 await perps.reconcile('hyperliquid_perps')
 ```
 
-**Venues and ids.** Orders, `snapshot` and `currentFunding` take the venue-native instrument (`venue_instrument_id`, e.g. `BTC`). Stored history (`funding`, `trades`, `candles`, `state`, `liquidations`) also accepts the Kairos `instrument_id` (`hl-mainnet-btc-usdt`). `markets.instruments()` gives both, plus `execution_venue` / `execution_instrument_id` for orders.
+**Venues and ids.** `markets.instruments()` names each instrument three ways. Orders take `execution_venue` and `execution_instrument_id`. `snapshot` and `currentFunding` take the venue-native `venue_instrument_id`, e.g. `BTC`. Stored history (`funding`, `trades`, `candles`, `state`, `liquidations`) takes either that or the Kairos `instrument_id`, e.g. `hl-mainnet-btc-usdt`.
 
 | `venue` | `account` | `instrument` in orders | Quantity unit | Collateral |
 | --- | --- | --- | --- | --- |

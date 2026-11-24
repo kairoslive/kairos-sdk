@@ -26,7 +26,10 @@ if (orders) {
   assert.equal(environment, "staging", "the live order path runs on staging only");
   for (const name of ["KAIROS_EXECUTION_URL", "KAIROS_MARKET_DATA_URL"]) {
     const url = process.env[name];
-    if (url) assert.match(new URL(url).hostname, /^staging-[a-z]+\.kairos\.trade$/, `${name} must be a staging host for the order path`);
+    if (url) {
+      const { protocol, hostname } = new URL(url);
+      assert.ok(protocol === "https:" && /^staging-[a-z]+\.kairos\.trade$/.test(hostname), `${name} must be an https staging host for the order path`);
+    }
   }
 }
 
@@ -91,12 +94,6 @@ test(`[${environment}] stored history pages and follows cursors`, { skip }, asyn
     if (++rows >= 12) break; // three pages
   }
   assert.equal(rows, 12);
-  const stale = [];
-  for (const venue of venues) {
-    const recent = await perps.markets.trades(venue, probe[venue], { from, to, limit: 1 });
-    if (recent.data.length === 0) stale.push(`${venue}/${probe[venue]}`);
-  }
-  assert.deepEqual(stale, [], "every venue has trades stored in the last hour");
   for (const venue of venues) {
     const candles = await perps.markets.candles(venue, probe[venue], { interval: "1h", limit: 2, from: to - 6 * 3600_000, to });
     assert.ok(candles.data.length > 0, `${venue} has hourly candles`);
@@ -106,6 +103,16 @@ test(`[${environment}] stored history pages and follows cursors`, { skip }, asyn
   const funding = await perps.markets.funding("hyperliquid", "BTC", { limit: 2, from: to - 24 * 3600_000, to });
   assert.ok(funding.data.length > 0, "a day of BTC funding is stored");
   await perps.markets.liquidations("hyperliquid", "BTC", { limit: 1 });
+});
+
+test(`[${environment}] every venue has trades stored in the last hour`, { skip }, async () => {
+  const to = Date.now();
+  const stale = [];
+  for (const venue of venues) {
+    const recent = await perps.markets.trades(venue, probe[venue], { from: to - 3600_000, to, limit: 1 });
+    if (recent.data.length === 0) stale.push(`${venue}/${probe[venue]}`);
+  }
+  assert.deepEqual(stale, []);
 });
 
 test(`[${environment}] account: margin, positions, orders, fills and history`, { skip: skipKey }, async () => {
@@ -159,19 +166,36 @@ test(`[${environment}] order path: rest a post-only limit far from the market, t
       t.skip(`order path refused before reaching the venue: ${error.status} ${error.code ?? ""} ${error.message}`);
       return;
     }
-    // A timeout or an unknown outcome may have left the order resting: cancel it by our id before failing.
-    await perps.cancelOrder("hyperliquid_perps", clientOrderId).catch((cancel: unknown) => {
-      console.error(`could not cancel ${clientOrderId} after a failed placement; check it by hand`, cancel);
-    });
+    // A timeout or an unknown outcome may have left the order resting: clean it up by our id before failing.
+    const status = await cleanUp(clientOrderId);
+    if (status !== "cancelled" && status !== "absent" && status !== "rejected") {
+      console.error(`order ${clientOrderId} not confirmed cancelled after a failed placement (last status ${status}); check it by hand`);
+    }
     throw error;
   }
+  let status: string;
   try {
     assert.equal(placed.client_order_id, clientOrderId);
     assert.equal((await perps.order("hyperliquid_perps", clientOrderId))?.client_order_id, clientOrderId);
   } finally {
-    const cancelled = await perps.cancelOrder("hyperliquid_perps", clientOrderId);
-    assert.ok(["cancelled", "pending", "submitted"].includes(String(cancelled.status)), `cancel answered ${cancelled.status}`);
+    status = await cleanUp(clientOrderId);
   }
-  const after = await perps.order("hyperliquid_perps", clientOrderId);
-  assert.notEqual(after?.status, "filled");
+  assert.equal(status, "cancelled", `order ${clientOrderId} must end cancelled; last status ${status}. Check it by hand if not.`);
 });
+
+/** Cancels by client order id, then reads it back until it is final (at most ~20 s). Returns the last status seen. */
+async function cleanUp(clientOrderId: string): Promise<string> {
+  const final = new Set(["cancelled", "filled", "expired", "rejected"]);
+  let status = "unknown";
+  for (let attempt = 0; attempt < 10; attempt++) {
+    if (attempt % 3 === 0) {
+      await perps.cancelOrder("hyperliquid_perps", clientOrderId).then((o) => { status = String(o.status); }, () => {});
+    }
+    const order = await perps.order("hyperliquid_perps", clientOrderId).catch(() => undefined);
+    if (order === null) return "absent";
+    if (order) status = String(order.status);
+    if (final.has(status)) return status;
+    await new Promise((resolve) => setTimeout(resolve, 2_000));
+  }
+  return status;
+}
