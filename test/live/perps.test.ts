@@ -173,27 +173,31 @@ test(`[${environment}] order path: rest a post-only limit far from the market, t
     }
     throw error;
   }
-  let status: string;
+  let status = "not cleaned up";
   try {
     assert.equal(placed.client_order_id, clientOrderId);
     assert.equal((await perps.order("hyperliquid_perps", clientOrderId))?.client_order_id, clientOrderId);
   } finally {
     status = await cleanUp(clientOrderId);
+    if (status !== "cancelled") console.error(`order ${clientOrderId} not confirmed cancelled (last status ${status}); check it by hand`);
   }
-  assert.equal(status, "cancelled", `order ${clientOrderId} must end cancelled; last status ${status}. Check it by hand if not.`);
+  assert.equal(status, "cancelled", `order ${clientOrderId} must end cancelled; last status ${status}`);
 });
 
-/** Cancels by client order id, then reads it back until it is final (at most ~20 s). Returns the last status seen. */
+/**
+ * Cancels by client order id and reads the order back until a read shows it final. Ten attempts, 2 s apart, with a
+ * cancel on attempts 1, 4, 7 and 10; each request has the suite's 20 s timeout. Only a read decides the status, and a
+ * `null` read (not visible yet, e.g. after a timed-out placement) keeps retrying. Returns the last status read:
+ * an order status, `absent` (never seen) or `unreadable`.
+ */
 async function cleanUp(clientOrderId: string): Promise<string> {
   const final = new Set(["cancelled", "filled", "expired", "rejected"]);
-  let status = "unknown";
+  let status = "unreadable";
   for (let attempt = 0; attempt < 10; attempt++) {
-    if (attempt % 3 === 0) {
-      await perps.cancelOrder("hyperliquid_perps", clientOrderId).then((o) => { status = String(o.status); }, () => {});
-    }
+    if (attempt % 3 === 0) await perps.cancelOrder("hyperliquid_perps", clientOrderId).catch(() => {});
     const order = await perps.order("hyperliquid_perps", clientOrderId).catch(() => undefined);
-    if (order === null) return "absent";
-    if (order) status = String(order.status);
+    if (order === null) status = "absent";
+    else if (order) status = String(order.status);
     if (final.has(status)) return status;
     await new Promise((resolve) => setTimeout(resolve, 2_000));
   }
