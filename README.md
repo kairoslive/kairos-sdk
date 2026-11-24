@@ -130,7 +130,7 @@ await perps.cancelOrder('hyperliquid_perps', clientOrderId)
 await perps.reconcile('hyperliquid_perps')
 ```
 
-**Venues and ids.** Orders use the execution venue and the venue-native instrument. Market data uses either the Kairos instrument id or the venue symbol. `markets.instruments()` gives both: `instrument_id` and `execution_venue` / `execution_instrument_id`.
+**Venues and ids.** Orders, `snapshot` and `currentFunding` take the venue-native instrument (`venue_instrument_id`, e.g. `BTC`). Stored history (`funding`, `trades`, `candles`, `state`, `liquidations`) also accepts the Kairos `instrument_id` (`hl-mainnet-btc-usdt`). `markets.instruments()` gives both, plus `execution_venue` / `execution_instrument_id` for orders.
 
 | `venue` | `account` | `instrument` in orders | Quantity unit | Collateral |
 | --- | --- | --- | --- | --- |
@@ -138,7 +138,7 @@ await perps.reconcile('hyperliquid_perps')
 | `polymarket_perps` | `"0"` or a lowercase `0x` wallet | numeric iid, `"1"` | contracts | pUSD |
 | `kalshi_margin` | subaccount `"0"`–`"63"` (`kalshiAccounts()`) | ticker, `KXBTCPERP` | contracts | USD |
 
-Every price, size and amount is an exact decimal string, in the instrument's quote per native unit. Market-data history rows use `{coefficient, scale}`; format one with `exactDecimal()`. A market order still carries `price`: your worst acceptable price.
+Every price, size and amount is an exact decimal string, in the instrument's quote per native unit. Market-data history rows use `{coefficient, scale}`; format one with `exactDecimal()`. A market order still carries `price`: your worst acceptable price. One exception: a Polymarket Perps trigger order (market, gtc, `trigger` + `trigger_price`) takes no `price`, and with `close_position: true` it sizes itself, so `quantity` can be omitted.
 
 **Orders.** `placeOrder` sends the body `POST /perps/orders` takes: `venue`, `instrument`, `client_order_id`, `side` (`buy`/`sell`), `kind` (`limit`/`market`), `tif` (`gtc`, `ioc`, `fok`, `gtd` with `expires_at`, `fak`), `price`, `quantity`, and optionally `account`, `post_only`, `reduce_only`, `close_position`, `trigger` (`take_profit`/`stop_loss`) with `trigger_price`, `leverage` and `margin_mode` (Hyperliquid and Polymarket only), and `bracket` (an opening Polymarket limit). `client_order_id` is the idempotency key: resend the same body with the same id after a timeout. Reusing an id with a different body is `409 CLIENT_ORDER_ID_CONFLICT`. Venue rules differ (Hyperliquid has no market FOK; Kalshi reduce-only needs IOC/FOK/FAK). See [the perps trading guide](https://github.com/kairoslive/kairos/blob/staging/docs/perpetuals/authenticated-api.md).
 
@@ -178,7 +178,7 @@ Market data (`kairos.perps.markets`, public; a key raises the rate budget):
 | `state` / `allState` | `GET …/state` | stored mark, oracle, funding, open interest (≤ 7 days) |
 | `liquidations` / `allLiquidations` | `GET …/liquidations` | stored public liquidations (only Hyperliquid flags them) |
 
-History takes `{ from?, to?, limit?, cursor? }`. `from` and `to` are a `Date`, unix ms or RFC 3339; `limit` is 1–5000, default 1000. Rows ascend by event time in `[from, to)`, and the `all*` iterators pin `to` so every page shares one range.
+History takes `{ from?, to?, limit?, cursor? }`. `from` and `to` are a `Date`, unix ms or RFC 3339; `limit` is 1–5000, default 1000. Rows ascend by event time in `[from, to)`. A cursor is only valid with the same `from` and `to` as the first page, and the server's default `to` is "now". So when paging by hand, set `to` on the first call and reuse it. The `all*` iterators do this for you.
 
 **Errors.** Failures throw `KairosError`:
 

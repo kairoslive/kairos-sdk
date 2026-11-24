@@ -207,7 +207,7 @@ test("perps errors keep status, the top-level PERP code and the stable class", a
   assert.ok(isPerpError(error, "PERP_PRICE_OFF_GRID"));
   assert.equal(error.outcomeUnknown, false);
 
-  const unknown = client(() => [502, { error: "venue did not answer", code: "PERP_OUTCOME_UNKNOWN", error_details: { code: "EXCHANGE_ERROR", message: "", actions: [] } }]);
+  const unknown = client(() => [409, { error: "venue did not answer", code: "PERP_OUTCOME_UNKNOWN", error_details: { code: "EXCHANGE_ERROR", message: "", actions: [] } }]);
   const lost = await failure(unknown.perps.cancelOrder("kalshi_margin", "x"));
   assert.equal(lost.outcomeUnknown, true);
 
@@ -262,6 +262,10 @@ test("market data: current funding falls back to stored state when the snapshot 
     return [200, u.searchParams.get("cursor") ? { data: [row("3")] } : { data: [row("1", { coefficient: "5", scale: 6 }), row("2", { coefficient: "17", scale: 5 })], nextCursor: "n" }];
   }, false);
   const funding = await perps.markets.currentFunding("kalshi_margin", "KXBTCPERP");
+  const none = client((_, u) => [200, u.pathname.endsWith("/snapshot") ? kalshi : { data: [row("9")] }], false);
+  const missing = await none.perps.markets.currentFunding("kalshi_margin", "KXBTCPERP");
+  assert.equal(missing.funding_rate, null);
+  assert.equal(missing.source, "snapshot", "no stored rate either: the timestamp is the snapshot's, so is the source");
   assert.deepEqual(funding, {
     venue: "kalshi_margin", instrument_id: "kalshi-margin-mainnet-kxbtcperp", venue_instrument_id: "KXBTCPERP", mark: null,
     funding_rate: "0.00017", next_funding_time_ns: "1795496400000000000", event_time_ns: "2", source: "stored_state",

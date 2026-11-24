@@ -22,7 +22,13 @@ const live = process.env.KAIROS_SDK_LIVE === "1";
 const environment = (process.env.KAIROS_ENV ?? "staging") as PerpsEnvironment;
 assert.ok(environment === "staging" || environment === "production", "KAIROS_ENV must be staging or production");
 const orders = process.env.KAIROS_SDK_LIVE_ORDERS === "1";
-if (orders) assert.equal(environment, "staging", "the live order path runs on staging only");
+if (orders) {
+  assert.equal(environment, "staging", "the live order path runs on staging only");
+  for (const name of ["KAIROS_EXECUTION_URL", "KAIROS_MARKET_DATA_URL"]) {
+    const url = process.env[name];
+    if (url) assert.match(new URL(url).hostname, /^staging-[a-z]+\.kairos\.trade$/, `${name} must be a staging host for the order path`);
+  }
+}
 
 function credentials() {
   const file = process.env.KAIROS_SDK_CREDENTIALS_FILE;
@@ -74,18 +80,23 @@ test(`[${environment}] books and current funding on every venue`, { skip }, asyn
 test(`[${environment}] stored history pages and follows cursors`, { skip }, async () => {
   const to = Date.now();
   const from = to - 60 * 60 * 1000;
-  const trades = await perps.markets.trades("hyperliquid", "BTC", { from, to, limit: 5 });
-  assert.ok(trades.data.length > 0, "an hour of BTC trades is stored");
-  assert.ok(trades.nextCursor, "a 5-row page of an hour of BTC trades has more behind it");
+  const trades = await perps.markets.trades("polymarket_perps", "1", { from, to, limit: 5 });
+  assert.ok(trades.nextCursor, "a 5-row page of an hour of trades has more behind it");
   let rows = 0;
   let last = 0n;
-  for await (const trade of perps.markets.allTrades("hyperliquid", "BTC", { from, to, limit: 5 })) {
+  for await (const trade of perps.markets.allTrades("polymarket_perps", "1", { from, to, limit: 5 })) {
     const at = BigInt(trade.eventTimeNs);
     assert.ok(at >= last, "rows ascend by event time across pages");
     last = at;
     if (++rows >= 12) break; // three pages
   }
   assert.equal(rows, 12);
+  const stale = [];
+  for (const venue of venues) {
+    const recent = await perps.markets.trades(venue, probe[venue], { from, to, limit: 1 });
+    if (recent.data.length === 0) stale.push(`${venue}/${probe[venue]}`);
+  }
+  assert.deepEqual(stale, [], "every venue has trades stored in the last hour");
   for (const venue of venues) {
     const candles = await perps.markets.candles(venue, probe[venue], { interval: "1h", limit: 2, from: to - 6 * 3600_000, to });
     assert.ok(candles.data.length > 0, `${venue} has hourly candles`);
@@ -148,6 +159,10 @@ test(`[${environment}] order path: rest a post-only limit far from the market, t
       t.skip(`order path refused before reaching the venue: ${error.status} ${error.code ?? ""} ${error.message}`);
       return;
     }
+    // A timeout or an unknown outcome may have left the order resting: cancel it by our id before failing.
+    await perps.cancelOrder("hyperliquid_perps", clientOrderId).catch((cancel: unknown) => {
+      console.error(`could not cancel ${clientOrderId} after a failed placement; check it by hand`, cancel);
+    });
     throw error;
   }
   try {

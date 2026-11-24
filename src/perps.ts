@@ -10,7 +10,8 @@
 
 import type { CallOptions } from "./common.ts";
 import { Http, KairosError, type FetchLike, type Query } from "./http.ts";
-import { RestClient, restAuthHeaders, type RestAuth } from "./rest.ts";
+import { RestClient, restAuthHeaders } from "./rest.ts";
+import type { ApiKeyCredentials } from "./wallets.ts";
 import type { components as ExecutionComponents } from "./openapi/perps-execution.ts";
 import type { components as MarketDataComponents, paths as PerpsMarketDataPaths } from "./openapi/perps-market-data.ts";
 import type { components as DataComponents, paths as PerpsDataPaths } from "./openapi/perps-data.ts";
@@ -57,9 +58,9 @@ export interface PerpsOptions {
   /**
    * The API key triple, sent as `x-client-id`, `x-api-key` and `x-api-secret`. Execution reads need `trade:read`; orders,
    * cancels, cancel-all and reconcile need `trade:execute`. Public market data works without a key, and a key raises
-   * the rate budget. Keep the secret on a server.
+   * the rate budget. Keep the secret on a server. (A browser session bearer would also need a CSRF header, so it is not offered.)
    */
-  auth?: RestAuth;
+  auth?: { apiKey: ApiKeyCredentials };
   fetch?: FetchLike;
 }
 
@@ -118,6 +119,8 @@ type Defaulted = "account" | "post_only" | "reduce_only" | "close_position" | "t
  *   subaccount `"0"`–`"63"`.
  * - `client_order_id` is the idempotency key. Use 32 lowercase hex, which every venue accepts (`newClientOrderId()`).
  * - `price` and `quantity` are decimal strings. A market order still carries `price`, the worst acceptable price.
+ *   Exception: a Polymarket Perps trigger (`trigger` + `trigger_price`, market, gtc) takes no `price`, and with
+ *   `close_position: true` it sizes itself from the position, so `quantity` may be omitted.
  * - `expires_at` is RFC 3339, only with `tif: "gtd"`.
  */
 export type PerpOrderInput = Omit<OrderRequest, Defaulted> & Partial<Pick<OrderRequest, Defaulted>>;
@@ -227,7 +230,11 @@ export interface PerpHistoryRange extends CallOptions {
   to?: Date | number | string;
   /** Rows per page, 1–5000, default 1000. Each started 1000 rows costs one heavy rate-limit unit. */
   limit?: number;
-  /** `nextCursor` from the previous page. Send the same `from` and `to` with it. */
+  /**
+   * `nextCursor` from the previous page. Send the same `from` and `to` with it. When paging by hand, set `to` on the
+   * first request too: the server's default `to` (and so the default `from`) moves between calls. The `all*` iterators
+   * pin it for you.
+   */
   cursor?: string;
 }
 
@@ -256,7 +263,8 @@ export interface PerpCurrentFunding {
   mark: string | null;
   /**
    * `snapshot`: the venue's public API, read now. `stored_state`: the newest row of `/state` within the last two minutes.
-   * Kalshi Margin's snapshot carries no funding rate, so it answers from `stored_state`.
+   * Kalshi Margin's snapshot carries no funding rate, so it answers from `stored_state`. When neither has a rate,
+   * `funding_rate` is null and `source` is `snapshot`.
    */
   source: "snapshot" | "stored_state";
 }
@@ -330,7 +338,8 @@ export class PerpsMarketsClient {
 
   /**
    * `GET /v1/perpetuals/{venue}/{instrument}/snapshot`: the venue-live book (`depth` levels per side) with mark, oracle,
-   * funding rate and open interest. `instrument` is venue-native (`BTC`, `1`, `KXBTCPERP`). Costs 6 heavy units.
+   * funding rate and open interest. `instrument` must be venue-native (`BTC`, `1`, `KXBTCPERP`: an instrument's
+   * `venue_instrument_id`); a Kairos `instrument_id` is `400 invalid_request` here. Costs 6 heavy units.
    */
   snapshot(venue: PerpMarketVenue, instrument: string, opts: { depth?: number } & CallOptions = {}): Promise<PerpSnapshot> {
     return this.md.request("GET", "/v1/perpetuals/{venue}/{instrument}/snapshot", {
@@ -341,6 +350,7 @@ export class PerpsMarketsClient {
   /**
    * The current funding rate and next funding time. Reads a depth-1 snapshot (6 heavy units). When the snapshot states
    * no rate (Kalshi Margin), it reads the last two minutes of stored `/state` (one more heavy unit) and uses the newest row.
+   * `instrument` is venue-native, as for `snapshot`.
    */
   async currentFunding(venue: PerpMarketVenue, instrument: string, opts: CallOptions = {}): Promise<PerpCurrentFunding> {
     const s = await this.snapshot(venue, instrument, { depth: 1, signal: opts.signal });
@@ -361,11 +371,14 @@ export class PerpsMarketsClient {
     for await (const row of this.allState(venue, s.canonical_instrument_id, { from: to - 120_000, to, limit: 1000, signal: opts.signal })) {
       if (row.fundingRate) latest = row;
     }
+    if (!latest?.fundingRate) {
+      return { ...base, funding_rate: null, next_funding_time_ns: null, event_time_ns: ns(s.market_state.event_time_ns)!, source: "snapshot" };
+    }
     return {
       ...base,
-      funding_rate: latest?.fundingRate ? exactDecimal(latest.fundingRate) : null,
-      next_funding_time_ns: latest?.nextFundingTimeNs ?? null,
-      event_time_ns: latest?.eventTimeNs ?? ns(s.market_state.event_time_ns)!,
+      funding_rate: exactDecimal(latest.fundingRate),
+      next_funding_time_ns: latest.nextFundingTimeNs ?? null,
+      event_time_ns: latest.eventTimeNs,
       source: "stored_state",
     };
   }
@@ -602,7 +615,7 @@ async function* followExecution<T>(page: (cursor: string | undefined) => Promise
 }
 
 /** True when `error` is a perps error with this top-level or stable code. */
-export function isPerpError(error: unknown, code: string): error is KairosError {
+export function isPerpError(error: unknown, code: string): boolean {
   if (!(error instanceof KairosError)) return false;
   const details = (error.body as Partial<PerpErrorBody> | undefined)?.error_details;
   return error.code === code || details?.code === code;
