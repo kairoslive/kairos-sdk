@@ -1,7 +1,7 @@
 {
   "name": "@kairos.trade/sdk",
-  "version": "0.5.0",
-  "description": "Kairos SDK: market data, trader stats, wallet trading (sign-what-we-send), fees, trade plans, on-chain intents and external signing. No runtime dependencies.",
+  "version": "0.6.0",
+  "description": "Kairos SDK: market data, trader stats, perps (Hyperliquid, Polymarket Perps, Kalshi Margin), wallet trading (sign-what-we-send), fees, trade plans, on-chain intents and external signing. No runtime dependencies.",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/kairoslive/kairos-sdk.git"
@@ -35,6 +35,7 @@
     "typecheck": "tsc --noEmit",
     "test": "node --experimental-strip-types --no-warnings --test test/*.test.ts",
     "test:live": "node --experimental-strip-types --no-warnings --test test/live/*.test.ts",
+    "test:live:perps": "node --experimental-strip-types --no-warnings --test test/live/perps.test.ts",
     "prepublishOnly": "npm run typecheck && npm test && npm run build"
   },
   "keywords": [
@@ -42,6 +43,8 @@
     "prediction-markets",
     "polymarket",
     "kalshi",
+    "perpetuals",
+    "hyperliquid",
     "eip712",
     "eip1193",
     "wallet"
